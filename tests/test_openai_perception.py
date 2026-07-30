@@ -35,8 +35,19 @@ def valid_payload() -> dict[str, object]:
         "language": "es",
         "intent": "greeting",
         "confidence": 0.95,
-        "entities": {"name": "Ana"},
+        "entities": [{"name": "name", "value": "Ana"}],
     }
+
+
+def assert_all_object_schemas_are_closed(value: object) -> None:
+    if isinstance(value, dict):
+        if value.get("type") == "object":
+            assert value.get("additionalProperties") is False
+        for item in value.values():
+            assert_all_object_schemas_are_closed(item)
+    elif isinstance(value, list):
+        for item in value:
+            assert_all_object_schemas_are_closed(item)
 
 
 def test_adapter_constructs_confirmed_structured_output_request() -> None:
@@ -56,13 +67,14 @@ def test_adapter_constructs_confirmed_structured_output_request() -> None:
     assert call["input"] == "Hola"
     assert call["temperature"] == 0
     schema = call["text_format"].model_json_schema()
-    assert schema["additionalProperties"] is False
+    assert_all_object_schemas_are_closed(schema)
     assert set(schema["required"]) == {
         "language",
         "intent",
         "confidence",
         "entities",
     }
+    assert schema["properties"]["entities"]["type"] == "array"
     assert "not exposed" not in repr(result)
 
 
@@ -122,12 +134,89 @@ def test_installed_sdk_uses_strict_json_schema_without_network() -> None:
     structured_format = request["text"]["format"]
     assert structured_format["type"] == "json_schema"
     assert structured_format["strict"] is True
-    assert set(structured_format["schema"]["required"]) == {
+    schema = structured_format["schema"]
+    assert_all_object_schemas_are_closed(schema)
+    assert schema["properties"]["entities"]["type"] == "array"
+    assert set(schema["required"]) == {
         "language",
         "intent",
         "confidence",
         "entities",
     }
+
+
+def test_empty_entity_list_converts_to_empty_mapping() -> None:
+    payload = {**valid_payload(), "entities": []}
+    adapter = OpenAIPerceptionClient(
+        StubOpenAI(payload),
+        "test-model",
+    )
+
+    result = adapter.perceive("Hola")
+
+    assert dict(result.entities) == {}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("Ana", "Ana"),
+        (2, 2),
+        (0.5, 0.5),
+        (True, True),
+        (False, False),
+        (None, None),
+    ],
+)
+def test_supported_scalar_entity_values_are_preserved(
+    value: object,
+    expected: object,
+) -> None:
+    payload = {
+        **valid_payload(),
+        "entities": [{"name": "value", "value": value}],
+    }
+    adapter = OpenAIPerceptionClient(
+        StubOpenAI(payload),
+        "test-model",
+    )
+
+    result = adapter.perceive("Hola")
+
+    assert result.entities["value"] == expected
+    assert type(result.entities["value"]) is type(expected)
+
+
+def test_duplicate_entity_names_are_rejected() -> None:
+    payload = {
+        **valid_payload(),
+        "entities": [
+            {"name": "person_name", "value": "Ana"},
+            {"name": "person_name", "value": "Mike"},
+        ],
+    }
+    adapter = OpenAIPerceptionClient(
+        StubOpenAI(payload),
+        "test-model",
+    )
+
+    with pytest.raises(ValueError, match="duplicate entity name"):
+        adapter.perceive("Hola")
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_blank_entity_names_are_rejected(name: str) -> None:
+    payload = {
+        **valid_payload(),
+        "entities": [{"name": name, "value": "Ana"}],
+    }
+    adapter = OpenAIPerceptionClient(
+        StubOpenAI(payload),
+        "test-model",
+    )
+
+    with pytest.raises(ValidationError):
+        adapter.perceive("Hola")
 
 
 @pytest.mark.parametrize(
@@ -136,6 +225,14 @@ def test_installed_sdk_uses_strict_json_schema_without_network() -> None:
         {"language": "es"},
         {**valid_payload(), "extra": "forbidden"},
         {**valid_payload(), "confidence": "invalid"},
+        {
+            **valid_payload(),
+            "entities": [{"name": "nested", "value": {"x": 1}}],
+        },
+        {
+            **valid_payload(),
+            "entities": [{"name": "nested", "value": [1, 2]}],
+        },
     ],
 )
 def test_adapter_rejects_malformed_structured_response(
