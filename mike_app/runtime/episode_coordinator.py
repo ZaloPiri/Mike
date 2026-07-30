@@ -53,3 +53,20 @@ class EpisodeCoordinator:
         self._event_store.append(event)
         self._episode_store.update(new_episode)
         return new_episode
+
+    def find_episode_for_event(
+        self,
+        tenant_id: str,
+        event_id: uuid.UUID,
+    ) -> CognitiveEpisode | None:
+        if not isinstance(tenant_id, str):
+            raise TypeError("tenant_id must be a string")
+        if not tenant_id or tenant_id.strip() == "":
+            raise ValueError("tenant_id is required and must be non-empty")
+        if not isinstance(event_id, uuid.UUID):
+            raise TypeError("event_id must be a uuid.UUID")
+
+        for episode in self._episode_store.list_for_tenant(tenant_id):
+            if event_id in episode.event_ids:
+                return episode
+        return None

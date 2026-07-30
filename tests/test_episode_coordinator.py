@@ -247,3 +247,155 @@ def test_updating_one_tenant_does_not_affect_another_tenant() -> None:
 
     assert coordinator._episode_store.list_for_tenant("tenant-1")[0].episode_id == tenant_one_episode.episode_id
     assert coordinator._episode_store.list_for_tenant("tenant-2")[0].episode_id == tenant_two_episode.episode_id
+
+
+def test_find_episode_for_event_finds_first_event() -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+    event = Event.create(
+        tenant_id="tenant-1",
+        event_type="test.event",
+    )
+    episode = coordinator.start_episode(event)
+
+    result = coordinator.find_episode_for_event(
+        "tenant-1",
+        event.event_id,
+    )
+
+    assert result is episode
+
+
+def test_find_episode_for_event_finds_later_event() -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+    first_event = Event.create(
+        tenant_id="tenant-1",
+        event_type="test.event.one",
+    )
+    episode = coordinator.start_episode(first_event)
+    later_event = Event.create(
+        tenant_id="tenant-1",
+        event_type="test.event.two",
+    )
+    updated_episode = coordinator.append_to_episode(
+        episode.episode_id,
+        later_event,
+    )
+
+    result = coordinator.find_episode_for_event(
+        "tenant-1",
+        later_event.event_id,
+    )
+
+    assert result is updated_episode
+
+
+def test_find_episode_for_event_returns_none_for_unknown_exact_uuid() -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+    event = Event.create(
+        tenant_id="tenant-1",
+        event_type="test.event",
+    )
+    coordinator.start_episode(event)
+
+    assert coordinator.find_episode_for_event(
+        "tenant-1",
+        uuid.uuid4(),
+    ) is None
+
+
+def test_find_episode_for_event_preserves_tenant_isolation() -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+    event = Event.create(
+        tenant_id="tenant-1",
+        event_type="test.event",
+    )
+    coordinator.start_episode(event)
+
+    assert coordinator.find_episode_for_event(
+        "tenant-2",
+        event.event_id,
+    ) is None
+
+
+def test_find_episode_for_event_does_not_mutate_state() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    event = Event.create(
+        tenant_id="tenant-1",
+        event_type="test.event",
+    )
+    episode = coordinator.start_episode(event)
+    original_event_ids = episode.event_ids
+
+    result = coordinator.find_episode_for_event(
+        "tenant-1",
+        event.event_id,
+    )
+
+    assert result is episode
+    assert result.event_ids == original_event_ids
+    assert event_store.total_count() == 1
+    assert episode_store.total_count() == 1
+    with pytest.raises(AttributeError):
+        result.tenant_id = "other"
+
+
+@pytest.mark.parametrize("invalid_tenant_id", [None, object()])
+def test_find_episode_for_event_rejects_non_string_tenant_id(
+    invalid_tenant_id: object,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+
+    with pytest.raises(TypeError, match="string"):
+        coordinator.find_episode_for_event(
+            invalid_tenant_id,
+            uuid.uuid4(),
+        )
+
+
+@pytest.mark.parametrize("invalid_tenant_id", ["", "   "])
+def test_find_episode_for_event_rejects_empty_tenant_id(
+    invalid_tenant_id: str,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+
+    with pytest.raises(ValueError, match="non-empty"):
+        coordinator.find_episode_for_event(
+            invalid_tenant_id,
+            uuid.uuid4(),
+        )
+
+
+@pytest.mark.parametrize("invalid_event_id", [None, object(), "not-a-uuid"])
+def test_find_episode_for_event_rejects_invalid_event_id(
+    invalid_event_id: object,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+
+    with pytest.raises(TypeError, match="uuid.UUID"):
+        coordinator.find_episode_for_event(
+            "tenant-1",
+            invalid_event_id,
+        )
