@@ -7,10 +7,12 @@ from mike_app.handlers.perception_normalization import (
 )
 from mike_app.perception.normalization import PerceptionNormalizer
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.episode_store import InMemoryEpisodeStore
 from mike_app.runtime.event import Event
 from mike_app.runtime.event_store import InMemoryEventStore
+from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
 class SpyNormalizer(PerceptionNormalizer):
@@ -36,7 +38,12 @@ def make_components() -> tuple[
     episode_store = InMemoryEpisodeStore()
     coordinator = EpisodeCoordinator(event_store, episode_store)
     normalizer = SpyNormalizer()
-    handler = PerceptionNormalizationHandler(coordinator, normalizer)
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
+    handler = PerceptionNormalizationHandler(
+        coordinator,
+        normalizer,
+        dispatcher,
+    )
     return event_store, episode_store, coordinator, normalizer, handler
 
 
@@ -90,10 +97,16 @@ def append_chain(
 def test_constructor_accepts_dependencies_and_handler_is_callable() -> None:
     _, _, coordinator, normalizer, _ = make_components()
 
-    handler = PerceptionNormalizationHandler(coordinator, normalizer)
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
+    handler = PerceptionNormalizationHandler(
+        coordinator,
+        normalizer,
+        dispatcher,
+    )
 
     assert handler._episode_coordinator is coordinator
     assert handler._perception_normalizer is normalizer
+    assert handler._runtime_dispatcher is dispatcher
     assert callable(handler)
 
 
@@ -105,6 +118,7 @@ def test_constructor_rejects_invalid_coordinator(
         PerceptionNormalizationHandler(
             invalid_coordinator,
             PerceptionNormalizer(),
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
         )
 
 
@@ -118,7 +132,28 @@ def test_constructor_rejects_invalid_normalizer(
     )
 
     with pytest.raises(TypeError, match="PerceptionNormalizer"):
-        PerceptionNormalizationHandler(coordinator, invalid_normalizer)
+        PerceptionNormalizationHandler(
+            coordinator,
+            invalid_normalizer,
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
+        )
+
+
+@pytest.mark.parametrize("invalid_dispatcher", [None, object()])
+def test_constructor_rejects_invalid_dispatcher(
+    invalid_dispatcher: object,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+
+    with pytest.raises(TypeError, match="RuntimeDispatcher"):
+        PerceptionNormalizationHandler(
+            coordinator,
+            PerceptionNormalizer(),
+            invalid_dispatcher,
+        )
 
 
 @pytest.mark.parametrize("invalid_context", [None, object()])
@@ -481,5 +516,73 @@ def test_repeated_explicit_invocation_adds_one_event_per_call() -> None:
         "message.accepted",
         "message.perceived",
         "perception.normalized",
+        "perception.normalized",
+    ]
+
+
+def test_dispatches_exact_normalized_context_once_after_append() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    normalizer = SpyNormalizer()
+    observed_contexts: list[RuntimeContext] = []
+
+    def downstream(context: RuntimeContext) -> None:
+        assert event_store.get_by_id(
+            context.event.tenant_id,
+            context.event.event_id,
+        ) is context.event
+        observed_contexts.append(context)
+
+    registry.register("perception.normalized", downstream)
+    handler = PerceptionNormalizationHandler(
+        coordinator,
+        normalizer,
+        dispatcher,
+    )
+    _, _, _, perceived = append_chain(coordinator)
+
+    handler(RuntimeContext.create(perceived))
+
+    normalized = event_store.list_for_tenant("tenant-1")[-1]
+    assert len(observed_contexts) == 1
+    assert observed_contexts[0].event is normalized
+
+
+def test_dispatch_failure_preserves_normalized_event_without_retry() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    calls = 0
+    error = RuntimeError("downstream failed")
+
+    def failing_downstream(context: RuntimeContext) -> None:
+        nonlocal calls
+        calls += 1
+        raise error
+
+    registry.register("perception.normalized", failing_downstream)
+    handler = PerceptionNormalizationHandler(
+        coordinator,
+        PerceptionNormalizer(),
+        dispatcher,
+    )
+    _, _, _, perceived = append_chain(coordinator)
+
+    with pytest.raises(RuntimeError, match="downstream failed") as exc_info:
+        handler(RuntimeContext.create(perceived))
+
+    assert exc_info.value is error
+    assert calls == 1
+    assert [event.event_type for event in event_store.list_for_tenant(
+        "tenant-1"
+    )] == [
+        "message.received",
+        "message.accepted",
+        "message.perceived",
         "perception.normalized",
     ]

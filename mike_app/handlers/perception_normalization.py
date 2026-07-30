@@ -5,6 +5,7 @@ from collections.abc import Mapping
 
 from mike_app.perception.normalization import PerceptionNormalizer
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.event import Event
 
@@ -14,6 +15,7 @@ class PerceptionNormalizationHandler:
         self,
         episode_coordinator: EpisodeCoordinator,
         perception_normalizer: PerceptionNormalizer,
+        runtime_dispatcher: RuntimeDispatcher,
     ) -> None:
         if not isinstance(episode_coordinator, EpisodeCoordinator):
             raise TypeError(
@@ -25,6 +27,11 @@ class PerceptionNormalizationHandler:
             )
         self._episode_coordinator = episode_coordinator
         self._perception_normalizer = perception_normalizer
+        if not isinstance(runtime_dispatcher, RuntimeDispatcher):
+            raise TypeError(
+                "runtime_dispatcher must be a RuntimeDispatcher"
+            )
+        self._runtime_dispatcher = runtime_dispatcher
 
     def __call__(
         self,
@@ -117,6 +124,9 @@ class PerceptionNormalizationHandler:
         self._episode_coordinator.append_to_episode(
             episode.episode_id,
             normalized_event,
+        )
+        self._runtime_dispatcher.dispatch(
+            RuntimeContext.create(normalized_event)
         )
 
     @staticmethod

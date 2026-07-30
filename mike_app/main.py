@@ -4,7 +4,15 @@ from openai import OpenAI
 from mike_app.api.dev_inspection import router as dev_inspection_router
 from mike_app.api.dev_messages import router as dev_messages_router
 from mike_app.api.health import router as health_router
+from mike_app.conversation.action_planning import ConversationActionPlanner
+from mike_app.conversation.response_planning import ResponseRequestPlanner
 from mike_app.core.settings import get_settings
+from mike_app.handlers.conversation_next_action import (
+    ConversationNextActionHandler,
+)
+from mike_app.handlers.conversation_response_request import (
+    ConversationResponseRequestHandler,
+)
 from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
 from mike_app.handlers.message_perception import MessagePerceptionHandler
 from mike_app.handlers.perception_normalization import (
@@ -27,10 +35,32 @@ episode_coordinator = EpisodeCoordinator(event_store, episode_store)
 runtime_handler_registry = RuntimeHandlerRegistry()
 runtime_dispatcher = RuntimeDispatcher(runtime_handler_registry)
 settings = get_settings()
+response_request_planner = ResponseRequestPlanner()
+conversation_response_request_handler = (
+    ConversationResponseRequestHandler(
+        episode_coordinator,
+        response_request_planner,
+    )
+)
+runtime_handler_registry.register(
+    "conversation.next_action",
+    conversation_response_request_handler,
+)
+conversation_action_planner = ConversationActionPlanner()
+conversation_next_action_handler = ConversationNextActionHandler(
+    episode_coordinator,
+    conversation_action_planner,
+    runtime_dispatcher,
+)
+runtime_handler_registry.register(
+    "perception.normalized",
+    conversation_next_action_handler,
+)
 perception_normalizer = PerceptionNormalizer()
 perception_normalization_handler = PerceptionNormalizationHandler(
     episode_coordinator,
     perception_normalizer,
+    runtime_dispatcher,
 )
 runtime_handler_registry.register(
     "message.perceived",
@@ -90,6 +120,14 @@ app.state.perception_enabled = perception_enabled
 app.state.perception_normalizer = perception_normalizer
 app.state.perception_normalization_handler = (
     perception_normalization_handler
+)
+app.state.conversation_action_planner = conversation_action_planner
+app.state.conversation_next_action_handler = (
+    conversation_next_action_handler
+)
+app.state.response_request_planner = response_request_planner
+app.state.conversation_response_request_handler = (
+    conversation_response_request_handler
 )
 
 app.include_router(health_router)
