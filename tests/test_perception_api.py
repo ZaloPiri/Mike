@@ -16,6 +16,8 @@ class FakePerceptionClient:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.error: Exception | None = None
+        self.intent = "greeting"
+        self.entities: dict[str, object] = {"explicit": "value"}
 
     def perceive(self, text: str) -> PerceptionResult:
         self.calls.append(text)
@@ -23,9 +25,9 @@ class FakePerceptionClient:
             raise self.error
         return PerceptionResult(
             language="es",
-            intent="greeting",
+            intent=self.intent,
             confidence=0.91,
-            entities={"explicit": "value"},
+            entities=self.entities,
         )
 
 
@@ -41,6 +43,7 @@ def register_fake_perception() -> tuple[
     handler = MessagePerceptionHandler(
         app.state.episode_coordinator,
         PerceptionService(fake),
+        app.state.runtime_dispatcher,
     )
     app.state.runtime_handler_registry.register(
         "message.accepted",
@@ -72,10 +75,15 @@ def test_missing_configuration_is_explicit_and_import_is_network_free() -> None:
     ) == 0
     assert app.state.runtime_handler_registry.count_for_type(
         "message.perceived"
+    ) == 1
+    assert app.state.runtime_handler_registry.count_for_type(
+        "perception.normalized"
     ) == 0
+    assert app.state.perception_normalizer is not None
+    assert app.state.perception_normalization_handler is not None
 
 
-def test_successful_perception_preserves_response_and_stores_three_events() -> None:
+def test_successful_perception_preserves_response_and_stores_four_events() -> None:
     tenant_id = unique_tenant("perception-success")
     fake, handler = register_fake_perception()
     try:
@@ -99,6 +107,7 @@ def test_successful_perception_preserves_response_and_stores_three_events() -> N
         "message.received",
         "message.accepted",
         "message.perceived",
+        "perception.normalized",
     ]
     assert episodes[0].event_ids == tuple(
         event.event_id for event in events
@@ -110,6 +119,15 @@ def test_successful_perception_preserves_response_and_stores_three_events() -> N
         "intent": "greeting",
         "confidence": 0.91,
         "entities": {"explicit": "value"},
+    }
+    assert events[3].to_dict()["payload"] == {
+        "source_event_id": str(events[0].event_id),
+        "accepted_event_id": str(events[1].event_id),
+        "perceived_event_id": str(events[2].event_id),
+        "language": "es",
+        "intent": "greeting",
+        "confidence": 0.91,
+        "entities": {},
     }
 
 
@@ -139,8 +157,8 @@ def test_repeated_requests_create_independent_perceived_episodes() -> None:
     assert fake.calls == ["First", "Second"]
     assert first_episode is not None
     assert second_episode is not None
-    assert len(first_episode.event_ids) == 3
-    assert len(second_episode.event_ids) == 3
+    assert len(first_episode.event_ids) == 4
+    assert len(second_episode.event_ids) == 4
     assert set(first_episode.event_ids).isdisjoint(
         second_episode.event_ids
     )
@@ -164,8 +182,8 @@ def test_perception_remains_tenant_isolated() -> None:
 
     first_events = app.state.event_store.list_for_tenant(first_tenant)
     second_events = app.state.event_store.list_for_tenant(second_tenant)
-    assert len(first_events) == 3
-    assert len(second_events) == 3
+    assert len(first_events) == 4
+    assert len(second_events) == 4
     assert all(event.tenant_id == first_tenant for event in first_events)
     assert all(event.tenant_id == second_tenant for event in second_events)
 
@@ -215,7 +233,32 @@ def test_invalid_request_does_not_call_perception() -> None:
     assert app.state.episode_store.total_count() == episode_count
 
 
-def test_inspection_exposes_three_events_and_health_is_unchanged() -> None:
+def test_normalization_failure_preserves_perceived_without_normalized() -> None:
+    tenant_id = unique_tenant("normalization-failure")
+    fake, handler = register_fake_perception()
+    fake.entities = {
+        "item": "sandwich",
+        "product": "empanada",
+    }
+    try:
+        with pytest.raises(ValueError, match="duplicate canonical"):
+            client.post(
+                "/dev/messages",
+                json={"tenant_id": tenant_id, "text": "Hola"},
+            )
+    finally:
+        unregister_fake_perception(handler)
+
+    assert fake.calls == ["Hola"]
+    assert [event.event_type for event in
+            app.state.event_store.list_for_tenant(tenant_id)] == [
+        "message.received",
+        "message.accepted",
+        "message.perceived",
+    ]
+
+
+def test_inspection_exposes_four_events_and_health_is_unchanged() -> None:
     tenant_id = unique_tenant("perception-inspection")
     _, handler = register_fake_perception()
     try:
@@ -237,11 +280,13 @@ def test_inspection_exposes_three_events_and_health_is_unchanged() -> None:
         "message.received",
         "message.accepted",
         "message.perceived",
+        "perception.normalized",
     ]
     assert [event["event_type"] for event in detail["events"]] == [
         "message.received",
         "message.accepted",
         "message.perceived",
+        "perception.normalized",
     ]
     assert health.json() == {
         "status": "ok",

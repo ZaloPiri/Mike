@@ -7,6 +7,10 @@ from mike_app.api.health import router as health_router
 from mike_app.core.settings import get_settings
 from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
 from mike_app.handlers.message_perception import MessagePerceptionHandler
+from mike_app.handlers.perception_normalization import (
+    PerceptionNormalizationHandler,
+)
+from mike_app.perception.normalization import PerceptionNormalizer
 from mike_app.perception.openai_client import OpenAIPerceptionClient
 from mike_app.perception.service import PerceptionService
 from mike_app.runtime.dispatcher import RuntimeDispatcher
@@ -23,6 +27,15 @@ episode_coordinator = EpisodeCoordinator(event_store, episode_store)
 runtime_handler_registry = RuntimeHandlerRegistry()
 runtime_dispatcher = RuntimeDispatcher(runtime_handler_registry)
 settings = get_settings()
+perception_normalizer = PerceptionNormalizer()
+perception_normalization_handler = PerceptionNormalizationHandler(
+    episode_coordinator,
+    perception_normalizer,
+)
+runtime_handler_registry.register(
+    "message.perceived",
+    perception_normalization_handler,
+)
 
 openai_sdk_client = None
 openai_perception_client = None
@@ -47,6 +60,7 @@ if perception_enabled:
     message_perception_handler = MessagePerceptionHandler(
         episode_coordinator,
         perception_service,
+        runtime_dispatcher,
     )
     runtime_handler_registry.register(
         "message.accepted",
@@ -73,6 +87,10 @@ app.state.openai_perception_client = openai_perception_client
 app.state.perception_service = perception_service
 app.state.message_perception_handler = message_perception_handler
 app.state.perception_enabled = perception_enabled
+app.state.perception_normalizer = perception_normalizer
+app.state.perception_normalization_handler = (
+    perception_normalization_handler
+)
 
 app.include_router(health_router)
 app.include_router(dev_messages_router)

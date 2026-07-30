@@ -6,10 +6,12 @@ from mike_app.handlers.message_perception import MessagePerceptionHandler
 from mike_app.perception.model import PerceptionResult
 from mike_app.perception.service import PerceptionService
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.episode_store import InMemoryEpisodeStore
 from mike_app.runtime.event import Event
 from mike_app.runtime.event_store import InMemoryEventStore
+from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
 class FakePerceptionClient:
@@ -42,7 +44,12 @@ def make_components() -> tuple[
     coordinator = EpisodeCoordinator(event_store, episode_store)
     client = FakePerceptionClient()
     service = PerceptionService(client)
-    handler = MessagePerceptionHandler(coordinator, service)
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
+    handler = MessagePerceptionHandler(
+        coordinator,
+        service,
+        dispatcher,
+    )
     return event_store, episode_store, coordinator, client, handler
 
 
@@ -70,11 +77,13 @@ def append_accepted(
 def test_constructor_accepts_dependencies_and_handler_is_callable() -> None:
     _, _, coordinator, client, _ = make_components()
     service = PerceptionService(client)
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
 
-    handler = MessagePerceptionHandler(coordinator, service)
+    handler = MessagePerceptionHandler(coordinator, service, dispatcher)
 
     assert handler._episode_coordinator is coordinator
     assert handler._perception_service is service
+    assert handler._runtime_dispatcher is dispatcher
     assert callable(handler)
 
 
@@ -88,6 +97,7 @@ def test_constructor_rejects_invalid_coordinator(
         MessagePerceptionHandler(
             invalid_coordinator,
             PerceptionService(client),
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
         )
 
 
@@ -101,7 +111,29 @@ def test_constructor_rejects_invalid_service(
     )
 
     with pytest.raises(TypeError, match="PerceptionService"):
-        MessagePerceptionHandler(coordinator, invalid_service)
+        MessagePerceptionHandler(
+            coordinator,
+            invalid_service,
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
+        )
+
+
+@pytest.mark.parametrize("invalid_dispatcher", [None, object()])
+def test_constructor_rejects_invalid_dispatcher(
+    invalid_dispatcher: object,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+    service = PerceptionService(FakePerceptionClient())
+
+    with pytest.raises(TypeError, match="RuntimeDispatcher"):
+        MessagePerceptionHandler(
+            coordinator,
+            service,
+            invalid_dispatcher,
+        )
 
 
 @pytest.mark.parametrize("invalid_context", [None, object()])
@@ -315,3 +347,89 @@ def test_repeated_explicit_invocation_adds_one_perceived_event_each() -> None:
         "message.perceived",
         "message.perceived",
     ]
+
+
+def test_dispatches_exact_perceived_context_once_after_append() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    client = FakePerceptionClient()
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    handler = MessagePerceptionHandler(
+        coordinator,
+        PerceptionService(client),
+        dispatcher,
+    )
+    source = Event.create(
+        tenant_id="tenant-1",
+        event_type="message.received",
+        payload={"text": "Hola"},
+    )
+    _, accepted = append_accepted(coordinator, source)
+    seen: list[RuntimeContext] = []
+    registry.register("message.perceived", seen.append)
+
+    handler(RuntimeContext.create(accepted))
+
+    perceived = event_store.list_for_tenant("tenant-1")[2]
+    assert len(seen) == 1
+    assert seen[0].event is perceived
+    assert coordinator.find_episode_for_event(
+        "tenant-1",
+        perceived.event_id,
+    ) is not None
+
+
+def test_dispatch_failure_leaves_perceived_stored_without_retry() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    client = FakePerceptionClient()
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    handler = MessagePerceptionHandler(
+        coordinator,
+        PerceptionService(client),
+        dispatcher,
+    )
+    source = Event.create(
+        tenant_id="tenant-1",
+        event_type="message.received",
+        payload={"text": "Hola"},
+    )
+    source_state = source.to_dict()
+    episode, accepted = append_accepted(coordinator, source)
+    calls = 0
+    error = RuntimeError("normalization failed")
+
+    def failing_handler(context: RuntimeContext) -> None:
+        nonlocal calls
+        calls += 1
+        raise error
+
+    registry.register("message.perceived", failing_handler)
+
+    with pytest.raises(
+        RuntimeError,
+        match="normalization failed",
+    ) as exc_info:
+        handler(RuntimeContext.create(accepted))
+
+    events = event_store.list_for_tenant("tenant-1")
+    updated_episode = episode_store.get_by_id(
+        "tenant-1",
+        episode.episode_id,
+    )
+    assert exc_info.value is error
+    assert calls == 1
+    assert [event.event_type for event in events] == [
+        "message.received",
+        "message.accepted",
+        "message.perceived",
+    ]
+    assert updated_episode is not None
+    assert updated_episode.event_ids == tuple(
+        event.event_id for event in events
+    )
+    assert source.to_dict() == source_state
