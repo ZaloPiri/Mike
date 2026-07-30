@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from mike_app.api.dev_inspection import router as dev_inspection_router
 from mike_app.api.dev_messages import router as dev_messages_router
 from mike_app.api.health import router as health_router
 from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
@@ -31,3 +32,4 @@ app.state.message_acceptance_handler = message_acceptance_handler
 
 app.include_router(health_router)
 app.include_router(dev_messages_router)
+app.include_router(dev_inspection_router)
