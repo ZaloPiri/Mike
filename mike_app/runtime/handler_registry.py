@@ -1,21 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
-from mike_app.runtime.event import Event
+from mike_app.runtime.context import RuntimeContext
 
-EventHandler = Callable[[Event], None]
+RuntimeHandler = Callable[[RuntimeContext], None]
 
 
 class RuntimeHandlerRegistry:
     def __init__(self) -> None:
-        self._handlers_by_event_type: dict[str, tuple[EventHandler, ...]] = {}
+        self._handlers_by_event_type: dict[str, tuple[RuntimeHandler, ...]] = {}
 
     def register(
         self,
         event_type: str,
-        handler: EventHandler,
+        handler: RuntimeHandler,
     ) -> None:
         self._validate_event_type(event_type)
         self._validate_handler(handler)
@@ -30,7 +29,7 @@ class RuntimeHandlerRegistry:
     def unregister(
         self,
         event_type: str,
-        handler: EventHandler,
+        handler: RuntimeHandler,
     ) -> None:
         self._validate_event_type(event_type)
         self._validate_handler(handler)
@@ -50,12 +49,15 @@ class RuntimeHandlerRegistry:
         else:
             self._handlers_by_event_type.pop(event_type, None)
 
-    def handlers_for(self, event: Event) -> tuple[EventHandler, ...]:
-        if not isinstance(event, Event):
-            raise TypeError("handlers_for expects an Event instance")
-        return self.handlers_for_type(event.event_type)
+    def handlers_for(
+        self,
+        context: RuntimeContext,
+    ) -> tuple[RuntimeHandler, ...]:
+        if not isinstance(context, RuntimeContext):
+            raise TypeError("handlers_for expects a RuntimeContext instance")
+        return self.handlers_for_type(context.event.event_type)
 
-    def handlers_for_type(self, event_type: str) -> tuple[EventHandler, ...]:
+    def handlers_for_type(self, event_type: str) -> tuple[RuntimeHandler, ...]:
         self._validate_event_type(event_type)
         return self._handlers_by_event_type.get(event_type, ())
 
@@ -72,6 +74,6 @@ class RuntimeHandlerRegistry:
         if not event_type or event_type.strip() == "":
             raise ValueError("event_type must be a non-empty string")
 
-    def _validate_handler(self, handler: EventHandler) -> None:
+    def _validate_handler(self, handler: RuntimeHandler) -> None:
         if not callable(handler):
             raise TypeError("handler must be callable")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mike_app.runtime.event import Event
+from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
@@ -13,11 +13,11 @@ class RuntimeDispatcher:
             raise TypeError("handler_registry must be a RuntimeHandlerRegistry")
         self._handler_registry = handler_registry
 
-    def dispatch(self, event: Event) -> None:
-        if not isinstance(event, Event):
-            raise TypeError("dispatch expects an Event instance")
+    def dispatch(self, context: RuntimeContext) -> None:
+        if not isinstance(context, RuntimeContext):
+            raise TypeError("dispatch expects a RuntimeContext instance")
 
-        handlers = self._handler_registry.handlers_for(event)
+        handlers = self._handler_registry.handlers_for(context)
 
         for handler in handlers:
-            handler(event)
+            handler(context)

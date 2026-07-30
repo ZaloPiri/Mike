@@ -1,5 +1,6 @@
 import pytest
 
+from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.event import Event
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
@@ -9,7 +10,7 @@ class EqualCallable:
         self.name = name
         self.calls = 0
 
-    def __call__(self) -> None:
+    def __call__(self, context: RuntimeContext) -> None:
         self.calls += 1
 
     def __eq__(self, other: object) -> bool:
@@ -21,7 +22,8 @@ def test_registry_starts_empty() -> None:
 
     assert registry.total_count() == 0
     assert registry.handlers_for_type("test.event") == ()
-    assert registry.handlers_for(Event.create(tenant_id="tenant-1", event_type="test.event")) == ()
+    event = Event.create(tenant_id="tenant-1", event_type="test.event")
+    assert registry.handlers_for(RuntimeContext.create(event)) == ()
 
 
 def test_register_one_handler() -> None:
@@ -89,21 +91,30 @@ def test_unknown_event_type_returns_empty_tuple() -> None:
     assert registry.handlers_for_type("unknown.event") == ()
 
 
-def test_handlers_for_uses_event_event_type() -> None:
+def test_handlers_for_accepts_runtime_context_and_uses_its_event_type() -> None:
     registry = RuntimeHandlerRegistry()
     handler = lambda: None
     event = Event.create(tenant_id="tenant-1", event_type="test.event")
+    context = RuntimeContext.create(event)
 
     registry.register("test.event", handler)
 
-    assert registry.handlers_for(event) == (handler,)
+    assert registry.handlers_for(context) == (handler,)
 
 
-def test_handlers_for_rejects_non_event_input() -> None:
+def test_handlers_for_rejects_bare_event() -> None:
+    registry = RuntimeHandlerRegistry()
+    event = Event.create(tenant_id="tenant-1", event_type="test.event")
+
+    with pytest.raises(TypeError, match="RuntimeContext"):
+        registry.handlers_for(event)
+
+
+def test_handlers_for_rejects_none() -> None:
     registry = RuntimeHandlerRegistry()
 
-    with pytest.raises(TypeError, match="Event"):
-        registry.handlers_for(object())
+    with pytest.raises(TypeError, match="RuntimeContext"):
+        registry.handlers_for(None)
 
 
 def test_empty_event_type_is_rejected() -> None:
@@ -265,10 +276,12 @@ def test_total_count_counts_registrations() -> None:
 def test_lookup_does_not_execute_handlers() -> None:
     registry = RuntimeHandlerRegistry()
     handler = EqualCallable("handler")
+    event = Event.create(tenant_id="tenant-1", event_type="test.event")
+    context = RuntimeContext.create(event)
 
     registry.register("test.event", handler)
 
-    assert registry.handlers_for_type("test.event") == (handler,)
+    assert registry.handlers_for(context) == (handler,)
     assert handler.calls == 0
 
 
