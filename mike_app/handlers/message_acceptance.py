@@ -1,4 +1,5 @@
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.event import Event
 
@@ -7,12 +8,18 @@ class MessageAcceptanceHandler:
     def __init__(
         self,
         episode_coordinator: EpisodeCoordinator,
+        runtime_dispatcher: RuntimeDispatcher,
     ) -> None:
         if not isinstance(episode_coordinator, EpisodeCoordinator):
             raise TypeError(
                 "episode_coordinator must be an EpisodeCoordinator"
             )
         self._episode_coordinator = episode_coordinator
+        if not isinstance(runtime_dispatcher, RuntimeDispatcher):
+            raise TypeError(
+                "runtime_dispatcher must be a RuntimeDispatcher"
+            )
+        self._runtime_dispatcher = runtime_dispatcher
 
     def __call__(
         self,
@@ -42,4 +49,7 @@ class MessageAcceptanceHandler:
         self._episode_coordinator.append_to_episode(
             episode.episode_id,
             derived_event,
+        )
+        self._runtime_dispatcher.dispatch(
+            RuntimeContext.create(derived_event)
         )

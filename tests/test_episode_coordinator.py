@@ -399,3 +399,58 @@ def test_find_episode_for_event_rejects_invalid_event_id(
             "tenant-1",
             invalid_event_id,
         )
+
+
+def test_get_event_returns_exact_tenant_scoped_event() -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+    event = Event.create(
+        tenant_id="tenant-1",
+        event_type="test.event",
+    )
+    coordinator.start_episode(event)
+
+    assert coordinator.get_event("tenant-1", event.event_id) is event
+    assert coordinator.get_event("tenant-2", event.event_id) is None
+    assert coordinator.get_event("tenant-1", uuid.uuid4()) is None
+
+
+@pytest.mark.parametrize("invalid_tenant_id", [None, object()])
+def test_get_event_rejects_non_string_tenant(
+    invalid_tenant_id: object,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+
+    with pytest.raises(TypeError, match="string"):
+        coordinator.get_event(invalid_tenant_id, uuid.uuid4())
+
+
+@pytest.mark.parametrize("invalid_tenant_id", ["", "   "])
+def test_get_event_rejects_empty_tenant(
+    invalid_tenant_id: str,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+
+    with pytest.raises(ValueError, match="non-empty"):
+        coordinator.get_event(invalid_tenant_id, uuid.uuid4())
+
+
+@pytest.mark.parametrize("invalid_event_id", [None, object(), "invalid"])
+def test_get_event_rejects_invalid_event_id(
+    invalid_event_id: object,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+
+    with pytest.raises(TypeError, match="uuid.UUID"):
+        coordinator.get_event("tenant-1", invalid_event_id)
