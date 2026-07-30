@@ -72,7 +72,6 @@ class OpenAIPerceptionClient:
                 "there are no entities, and do not invent missing values."
             ),
             input=text,
-            temperature=0,
             text_format=_StructuredPerception,
         )
         parsed = response.output_parsed

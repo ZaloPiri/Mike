@@ -65,7 +65,7 @@ def test_adapter_constructs_confirmed_structured_output_request() -> None:
     call = sdk_client.responses.calls[0]
     assert call["model"] == "test-model"
     assert call["input"] == "Hola"
-    assert call["temperature"] == 0
+    assert "temperature" not in call
     schema = call["text_format"].model_json_schema()
     assert_all_object_schemas_are_closed(schema)
     assert set(schema["required"]) == {
@@ -130,7 +130,7 @@ def test_installed_sdk_uses_strict_json_schema_without_network() -> None:
     request = captured_requests[0]
     assert request["model"] == "test-model"
     assert request["input"] == "Hola"
-    assert request["temperature"] == 0
+    assert "temperature" not in request
     structured_format = request["text"]["format"]
     assert structured_format["type"] == "json_schema"
     assert structured_format["strict"] is True
