@@ -7,10 +7,12 @@ from mike_app.handlers.conversation_response_request import (
     ConversationResponseRequestHandler,
 )
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.episode_store import InMemoryEpisodeStore
 from mike_app.runtime.event import Event
 from mike_app.runtime.event_store import InMemoryEventStore
+from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
 class SpyPlanner(ResponseRequestPlanner):
@@ -30,7 +32,12 @@ def make_components():
     episode_store = InMemoryEpisodeStore()
     coordinator = EpisodeCoordinator(event_store, episode_store)
     planner = SpyPlanner()
-    handler = ConversationResponseRequestHandler(coordinator, planner)
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
+    handler = ConversationResponseRequestHandler(
+        coordinator,
+        planner,
+        dispatcher,
+    )
     return event_store, episode_store, coordinator, planner, handler
 
 
@@ -115,10 +122,16 @@ def append_chain(
 def test_constructor_and_callable_interface() -> None:
     _, _, coordinator, planner, _ = make_components()
 
-    handler = ConversationResponseRequestHandler(coordinator, planner)
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
+    handler = ConversationResponseRequestHandler(
+        coordinator,
+        planner,
+        dispatcher,
+    )
 
     assert handler._episode_coordinator is coordinator
     assert handler._response_request_planner is planner
+    assert handler._runtime_dispatcher is dispatcher
     assert callable(handler)
 
 
@@ -151,7 +164,28 @@ def test_constructor_validation(
     match: str,
 ) -> None:
     with pytest.raises(TypeError, match=match):
-        ConversationResponseRequestHandler(coordinator, planner)
+        ConversationResponseRequestHandler(
+            coordinator,
+            planner,
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
+        )
+
+
+@pytest.mark.parametrize("dispatcher", [None, object()])
+def test_constructor_rejects_invalid_dispatcher(
+    dispatcher: object,
+) -> None:
+    coordinator = EpisodeCoordinator(
+        InMemoryEventStore(),
+        InMemoryEpisodeStore(),
+    )
+
+    with pytest.raises(TypeError, match="RuntimeDispatcher"):
+        ConversationResponseRequestHandler(
+            coordinator,
+            ResponseRequestPlanner(),
+            dispatcher,
+        )
 
 
 @pytest.mark.parametrize("context", [None, object()])
@@ -497,5 +531,77 @@ def test_repeated_invocation_has_no_deduplication() -> None:
         "tenant-1"
     )][-2:] == [
         "conversation.response_request",
+        "conversation.response_request",
+    ]
+
+
+def test_dispatches_exact_response_request_once_after_append() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    observed_contexts: list[RuntimeContext] = []
+
+    def downstream(context: RuntimeContext) -> None:
+        assert event_store.get_by_id(
+            context.event.tenant_id,
+            context.event.event_id,
+        ) is context.event
+        observed_contexts.append(context)
+
+    registry.register("conversation.response_request", downstream)
+    handler = ConversationResponseRequestHandler(
+        coordinator,
+        ResponseRequestPlanner(),
+        dispatcher,
+    )
+    *_, next_action = append_chain(coordinator)
+
+    handler(RuntimeContext.create(next_action))
+
+    response_request = event_store.list_for_tenant("tenant-1")[-1]
+    assert len(observed_contexts) == 1
+    assert observed_contexts[0].event is response_request
+
+
+def test_dispatch_failure_preserves_response_request_without_retry() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    calls = 0
+    error = RuntimeError("generation dispatch failed")
+
+    def failing_downstream(context: RuntimeContext) -> None:
+        nonlocal calls
+        calls += 1
+        raise error
+
+    registry.register("conversation.response_request", failing_downstream)
+    handler = ConversationResponseRequestHandler(
+        coordinator,
+        ResponseRequestPlanner(),
+        dispatcher,
+    )
+    *_, next_action = append_chain(coordinator)
+
+    with pytest.raises(
+        RuntimeError,
+        match="generation dispatch failed",
+    ) as exc_info:
+        handler(RuntimeContext.create(next_action))
+
+    assert exc_info.value is error
+    assert calls == 1
+    assert [event.event_type for event in event_store.list_for_tenant(
+        "tenant-1"
+    )] == [
+        "message.received",
+        "message.accepted",
+        "message.perceived",
+        "perception.normalized",
+        "conversation.next_action",
         "conversation.response_request",
     ]

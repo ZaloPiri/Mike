@@ -5,6 +5,9 @@ from mike_app.api.dev_inspection import router as dev_inspection_router
 from mike_app.api.dev_messages import router as dev_messages_router
 from mike_app.api.health import router as health_router
 from mike_app.conversation.action_planning import ConversationActionPlanner
+from mike_app.conversation.response_generation import (
+    DeterministicResponseGenerator,
+)
 from mike_app.conversation.response_planning import ResponseRequestPlanner
 from mike_app.core.settings import get_settings
 from mike_app.handlers.conversation_next_action import (
@@ -12,6 +15,9 @@ from mike_app.handlers.conversation_next_action import (
 )
 from mike_app.handlers.conversation_response_request import (
     ConversationResponseRequestHandler,
+)
+from mike_app.handlers.conversation_response_generated import (
+    ConversationResponseGeneratedHandler,
 )
 from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
 from mike_app.handlers.message_perception import MessagePerceptionHandler
@@ -35,11 +41,23 @@ episode_coordinator = EpisodeCoordinator(event_store, episode_store)
 runtime_handler_registry = RuntimeHandlerRegistry()
 runtime_dispatcher = RuntimeDispatcher(runtime_handler_registry)
 settings = get_settings()
+deterministic_response_generator = DeterministicResponseGenerator()
+conversation_response_generated_handler = (
+    ConversationResponseGeneratedHandler(
+        episode_coordinator,
+        deterministic_response_generator,
+    )
+)
+runtime_handler_registry.register(
+    "conversation.response_request",
+    conversation_response_generated_handler,
+)
 response_request_planner = ResponseRequestPlanner()
 conversation_response_request_handler = (
     ConversationResponseRequestHandler(
         episode_coordinator,
         response_request_planner,
+        runtime_dispatcher,
     )
 )
 runtime_handler_registry.register(
@@ -128,6 +146,12 @@ app.state.conversation_next_action_handler = (
 app.state.response_request_planner = response_request_planner
 app.state.conversation_response_request_handler = (
     conversation_response_request_handler
+)
+app.state.deterministic_response_generator = (
+    deterministic_response_generator
+)
+app.state.conversation_response_generated_handler = (
+    conversation_response_generated_handler
 )
 
 app.include_router(health_router)

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 
 from mike_app.conversation.response_planning import ResponseRequestPlanner
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.event import Event
 
@@ -14,6 +15,7 @@ class ConversationResponseRequestHandler:
         self,
         episode_coordinator: EpisodeCoordinator,
         response_request_planner: ResponseRequestPlanner,
+        runtime_dispatcher: RuntimeDispatcher,
     ) -> None:
         if not isinstance(episode_coordinator, EpisodeCoordinator):
             raise TypeError(
@@ -29,6 +31,11 @@ class ConversationResponseRequestHandler:
             )
         self._episode_coordinator = episode_coordinator
         self._response_request_planner = response_request_planner
+        if not isinstance(runtime_dispatcher, RuntimeDispatcher):
+            raise TypeError(
+                "runtime_dispatcher must be a RuntimeDispatcher"
+            )
+        self._runtime_dispatcher = runtime_dispatcher
 
     def __call__(self, context: RuntimeContext) -> None:
         if not isinstance(context, RuntimeContext):
@@ -208,6 +215,9 @@ class ConversationResponseRequestHandler:
         self._episode_coordinator.append_to_episode(
             episode.episode_id,
             response_request_event,
+        )
+        self._runtime_dispatcher.dispatch(
+            RuntimeContext.create(response_request_event)
         )
 
     def _get_event(

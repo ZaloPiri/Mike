@@ -85,6 +85,9 @@ def test_missing_configuration_is_explicit_and_import_is_network_free() -> None:
     ) == 1
     assert app.state.runtime_handler_registry.count_for_type(
         "conversation.response_request"
+    ) == 1
+    assert app.state.runtime_handler_registry.count_for_type(
+        "conversation.response_generated"
     ) == 0
     assert app.state.perception_normalizer is not None
     assert app.state.perception_normalization_handler is not None
@@ -102,9 +105,16 @@ def test_missing_configuration_is_explicit_and_import_is_network_free() -> None:
         ._response_request_planner
         is app.state.response_request_planner
     )
+    assert app.state.deterministic_response_generator is not None
+    assert app.state.conversation_response_generated_handler is not None
+    assert (
+        app.state.conversation_response_generated_handler
+        ._response_generator
+        is app.state.deterministic_response_generator
+    )
 
 
-def test_successful_perception_preserves_response_and_stores_six_events() -> None:
+def test_successful_perception_preserves_response_and_stores_seven_events() -> None:
     tenant_id = unique_tenant("perception-success")
     fake, handler = register_fake_perception()
     try:
@@ -131,6 +141,7 @@ def test_successful_perception_preserves_response_and_stores_six_events() -> Non
         "perception.normalized",
         "conversation.next_action",
         "conversation.response_request",
+        "conversation.response_generated",
     ]
     assert episodes[0].event_ids == tuple(
         event.event_id for event in events
@@ -174,6 +185,18 @@ def test_successful_perception_preserves_response_and_stores_six_events() -> Non
         "requested_entities": [],
         "handoff_reason": None,
     }
+    assert events[6].to_dict()["payload"] == {
+        "source_event_id": str(events[0].event_id),
+        "accepted_event_id": str(events[1].event_id),
+        "perceived_event_id": str(events[2].event_id),
+        "normalized_event_id": str(events[3].event_id),
+        "next_action_event_id": str(events[4].event_id),
+        "response_request_event_id": str(events[5].event_id),
+        "response_type": "intent_response",
+        "language": "es",
+        "text": "¡Hola! ¿En qué puedo ayudarte?",
+        "generation_method": "deterministic_template",
+    }
 
 
 def test_repeated_requests_create_independent_perceived_episodes() -> None:
@@ -202,8 +225,8 @@ def test_repeated_requests_create_independent_perceived_episodes() -> None:
     assert fake.calls == ["First", "Second"]
     assert first_episode is not None
     assert second_episode is not None
-    assert len(first_episode.event_ids) == 6
-    assert len(second_episode.event_ids) == 6
+    assert len(first_episode.event_ids) == 7
+    assert len(second_episode.event_ids) == 7
     assert set(first_episode.event_ids).isdisjoint(
         second_episode.event_ids
     )
@@ -227,8 +250,8 @@ def test_perception_remains_tenant_isolated() -> None:
 
     first_events = app.state.event_store.list_for_tenant(first_tenant)
     second_events = app.state.event_store.list_for_tenant(second_tenant)
-    assert len(first_events) == 6
-    assert len(second_events) == 6
+    assert len(first_events) == 7
+    assert len(second_events) == 7
     assert all(event.tenant_id == first_tenant for event in first_events)
     assert all(event.tenant_id == second_tenant for event in second_events)
 
@@ -268,8 +291,10 @@ def test_invalid_request_does_not_call_perception_or_planning(
     episode_count = app.state.episode_store.total_count()
     planner_calls: list[dict[str, object]] = []
     response_planner_calls: list[dict[str, object]] = []
+    generator_calls: list[dict[str, object]] = []
     original_plan = app.state.conversation_action_planner.plan
     original_response_plan = app.state.response_request_planner.plan
+    original_generate = app.state.deterministic_response_generator.generate
 
     def record_plan(**kwargs: object):
         planner_calls.append(kwargs)
@@ -278,6 +303,10 @@ def test_invalid_request_does_not_call_perception_or_planning(
     def record_response_plan(**kwargs: object):
         response_planner_calls.append(kwargs)
         return original_response_plan(**kwargs)
+
+    def record_generate(**kwargs: object):
+        generator_calls.append(kwargs)
+        return original_generate(**kwargs)
 
     monkeypatch.setattr(
         app.state.conversation_action_planner,
@@ -288,6 +317,11 @@ def test_invalid_request_does_not_call_perception_or_planning(
         app.state.response_request_planner,
         "plan",
         record_response_plan,
+    )
+    monkeypatch.setattr(
+        app.state.deterministic_response_generator,
+        "generate",
+        record_generate,
     )
     try:
         response = client.post(
@@ -301,6 +335,7 @@ def test_invalid_request_does_not_call_perception_or_planning(
     assert fake.calls == []
     assert planner_calls == []
     assert response_planner_calls == []
+    assert generator_calls == []
     assert app.state.event_store.total_count() == event_count
     assert app.state.episode_store.total_count() == episode_count
 
@@ -330,7 +365,7 @@ def test_normalization_failure_preserves_perceived_without_normalized() -> None:
     ]
 
 
-def test_inspection_exposes_six_events_and_health_is_unchanged() -> None:
+def test_inspection_exposes_seven_events_and_health_is_unchanged() -> None:
     tenant_id = unique_tenant("perception-inspection")
     _, handler = register_fake_perception()
     try:
@@ -355,6 +390,7 @@ def test_inspection_exposes_six_events_and_health_is_unchanged() -> None:
         "perception.normalized",
         "conversation.next_action",
         "conversation.response_request",
+        "conversation.response_generated",
     ]
     assert [event["event_type"] for event in detail["events"]] == [
         "message.received",
@@ -363,6 +399,7 @@ def test_inspection_exposes_six_events_and_health_is_unchanged() -> None:
         "perception.normalized",
         "conversation.next_action",
         "conversation.response_request",
+        "conversation.response_generated",
     ]
     assert health.json() == {
         "status": "ok",
@@ -375,83 +412,132 @@ def test_inspection_exposes_six_events_and_health_is_unchanged() -> None:
     (
         "intent",
         "entities",
-        "language",
         "action",
         "response_type",
         "handoff_reason",
         "requested",
+        "expected_text",
     ),
     [
         (
             "greeting",
             {},
-            "  Español (AR)  ",
             "respond",
             "intent_response",
             None,
             [],
+            "¡Hola! ¿En qué puedo ayudarte?",
+        ),
+        (
+            "product_inquiry",
+            {},
+            "respond",
+            "intent_response",
+            None,
+            [],
+            "Para ayudarte con los productos necesito consultar la "
+            "información del comercio.",
+        ),
+        (
+            "price_inquiry",
+            {},
+            "respond",
+            "intent_response",
+            None,
+            [],
+            "Para informarte el precio necesito consultar la información "
+            "del comercio.",
+        ),
+        (
+            "availability_inquiry",
+            {},
+            "respond",
+            "intent_response",
+            None,
+            [],
+            "Para confirmarte la disponibilidad necesito consultar la "
+            "información del comercio.",
         ),
         (
             "place_order",
             {"product": "sandwich", "quantity": 2},
-            "es",
             "respond",
             "intent_response",
             None,
             [],
+            "Entendí que querés realizar un pedido. Antes de confirmarlo "
+            "necesito consultar la información del comercio.",
+        ),
+        (
+            "place_order",
+            {"quantity": 2},
+            "request_missing_information",
+            "missing_information",
+            None,
+            ["product"],
+            "¿Qué producto necesitás?",
         ),
         (
             "place_order",
             {"product": "sandwich"},
-            "es",
             "request_missing_information",
             "missing_information",
             None,
             ["quantity"],
+            "¿Qué cantidad necesitás?",
+        ),
+        (
+            "place_order",
+            {},
+            "request_missing_information",
+            "missing_information",
+            None,
+            ["product", "quantity"],
+            "¿Qué producto y qué cantidad necesitás?",
         ),
         (
             "complaint",
             {},
-            "es",
             "handoff_human",
             "human_handoff",
             "complaint_requires_human",
             [],
+            "Lamento lo ocurrido. Voy a derivarte con una persona para "
+            "que pueda ayudarte.",
         ),
         (
             "human_assistance",
             {},
-            "es",
             "handoff_human",
             "human_handoff",
             "human_requested",
             [],
+            "Voy a derivarte con una persona para que pueda ayudarte.",
         ),
         (
             "unknown",
             {},
-            "es",
             "request_clarification",
             "clarification",
             None,
             [],
+            "No terminé de entender tu mensaje. ¿Podés reformularlo?",
         ),
     ],
 )
-def test_response_request_policy_through_api(
+def test_generated_response_policy_through_api(
     intent: str,
     entities: dict[str, object],
-    language: str,
     action: str,
     response_type: str,
     handoff_reason: str | None,
     requested: list[str],
+    expected_text: str,
 ) -> None:
-    tenant_id = unique_tenant(f"next-action-{intent}")
+    tenant_id = unique_tenant(f"generated-{intent}")
     fake, handler = register_fake_perception()
     fake.intent = intent
     fake.entities = entities
-    fake.language = language
     try:
         response = client.post(
             "/dev/messages",
@@ -462,14 +548,22 @@ def test_response_request_policy_through_api(
 
     assert response.status_code == 201
     events = app.state.event_store.list_for_tenant(tenant_id)
-    next_action_payload = events[-2].to_dict()["payload"]
-    response_payload = events[-1].to_dict()["payload"]
+    next_action_payload = events[-3].to_dict()["payload"]
+    response_payload = events[-2].to_dict()["payload"]
+    generated_payload = events[-1].to_dict()["payload"]
     assert next_action_payload["action"] == action
     assert response_payload["response_type"] == response_type
-    assert response_payload["target_language"] == language
+    assert response_payload["target_language"] == "es"
     assert response_payload["intent"] == intent
     assert response_payload["handoff_reason"] == handoff_reason
     assert response_payload["requested_entities"] == requested
+    assert generated_payload["response_type"] == response_type
+    assert generated_payload["language"] == "es"
+    assert generated_payload["text"] == expected_text
+    assert (
+        generated_payload["generation_method"]
+        == "deterministic_template"
+    )
 
 
 def test_planning_failure_preserves_first_four_events(
@@ -549,4 +643,47 @@ def test_response_request_planning_failure_preserves_first_five_events(
         "message.perceived",
         "perception.normalized",
         "conversation.next_action",
+    ]
+
+
+def test_generation_failure_preserves_first_six_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id = unique_tenant("generation-failure")
+    fake, handler = register_fake_perception()
+    calls = 0
+    error = RuntimeError("generation failed")
+
+    def fail_generate(**kwargs: object):
+        nonlocal calls
+        calls += 1
+        raise error
+
+    monkeypatch.setattr(
+        app.state.deterministic_response_generator,
+        "generate",
+        fail_generate,
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="generation failed",
+        ) as exc_info:
+            client.post(
+                "/dev/messages",
+                json={"tenant_id": tenant_id, "text": "Hola"},
+            )
+    finally:
+        unregister_fake_perception(handler)
+
+    assert exc_info.value is error
+    assert calls == 1
+    assert [event.event_type for event in
+            app.state.event_store.list_for_tenant(tenant_id)] == [
+        "message.received",
+        "message.accepted",
+        "message.perceived",
+        "perception.normalized",
+        "conversation.next_action",
+        "conversation.response_request",
     ]
