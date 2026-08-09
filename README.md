@@ -114,3 +114,24 @@ El MVP deberá permitir:
 
 Proyecto en etapa inicial de arquitectura y definición del MVP.
 
+
+## Development environment and reproducible setup
+
+
+The primary verified development environment is Windows with Python 3.14.6. The full test suite was also verified on Linux with Python 3.12.13. Compatibility with other Python versions or operating systems has not been verified.
+
+
+`requirements.txt` declares the project dependencies. `constraints.txt` pins the verified versions of the project's key dependencies to provide a stable installation baseline. Create and verify that environment from PowerShell with:
+
+
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\python.exe --version
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -c constraints.txt
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+
+The expected test result is `777 passed`. The verified runs emit one known `StarletteDeprecationWarning` concerning the use of `httpx` with `starlette.testclient`. Migration to `httpx2` is outside the scope of this stabilization.
+
