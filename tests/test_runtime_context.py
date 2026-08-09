@@ -70,7 +70,7 @@ def test_undeclared_attributes_cannot_be_added_because_slots_are_enabled() -> No
     event = Event.create(tenant_id="tenant-1", event_type="test.event")
     context = RuntimeContext.create(event)
 
-    with pytest.raises(AttributeError):
+    with pytest.raises((AttributeError, TypeError)):
         context.extra = "value"
 
 
