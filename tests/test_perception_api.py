@@ -88,7 +88,7 @@ def test_missing_configuration_is_explicit_and_import_is_network_free() -> None:
     ) == 1
     assert app.state.runtime_handler_registry.count_for_type(
         "conversation.response_generated"
-    ) == 0
+    ) == 1
     assert app.state.perception_normalizer is not None
     assert app.state.perception_normalization_handler is not None
     assert app.state.conversation_action_planner is not None
@@ -112,9 +112,19 @@ def test_missing_configuration_is_explicit_and_import_is_network_free() -> None:
         ._response_generator
         is app.state.deterministic_response_generator
     )
+    assert app.state.conversation_response_validator is not None
+    assert app.state.conversation_response_validated_handler is not None
+    assert (
+        app.state.conversation_response_validated_handler
+        ._response_validator
+        is app.state.conversation_response_validator
+    )
+    assert app.state.runtime_handler_registry.count_for_type(
+        "conversation.response_validated"
+    ) == 0
 
 
-def test_successful_perception_preserves_response_and_stores_seven_events() -> None:
+def test_successful_perception_preserves_response_and_stores_eight_events() -> None:
     tenant_id = unique_tenant("perception-success")
     fake, handler = register_fake_perception()
     try:
@@ -142,6 +152,7 @@ def test_successful_perception_preserves_response_and_stores_seven_events() -> N
         "conversation.next_action",
         "conversation.response_request",
         "conversation.response_generated",
+        "conversation.response_validated",
     ]
     assert episodes[0].event_ids == tuple(
         event.event_id for event in events
@@ -197,6 +208,20 @@ def test_successful_perception_preserves_response_and_stores_seven_events() -> N
         "text": "¡Hola! ¿En qué puedo ayudarte?",
         "generation_method": "deterministic_template",
     }
+    assert events[7].to_dict()["payload"] == {
+        "source_event_id": str(events[0].event_id),
+        "accepted_event_id": str(events[1].event_id),
+        "perceived_event_id": str(events[2].event_id),
+        "normalized_event_id": str(events[3].event_id),
+        "next_action_event_id": str(events[4].event_id),
+        "response_request_event_id": str(events[5].event_id),
+        "response_generated_event_id": str(events[6].event_id),
+        "response_type": "intent_response",
+        "language": "es",
+        "text": "¡Hola! ¿En qué puedo ayudarte?",
+        "generation_method": "deterministic_template",
+        "validation_method": "deterministic_contract",
+    }
 
 
 def test_repeated_requests_create_independent_perceived_episodes() -> None:
@@ -225,8 +250,8 @@ def test_repeated_requests_create_independent_perceived_episodes() -> None:
     assert fake.calls == ["First", "Second"]
     assert first_episode is not None
     assert second_episode is not None
-    assert len(first_episode.event_ids) == 7
-    assert len(second_episode.event_ids) == 7
+    assert len(first_episode.event_ids) == 8
+    assert len(second_episode.event_ids) == 8
     assert set(first_episode.event_ids).isdisjoint(
         second_episode.event_ids
     )
@@ -250,8 +275,8 @@ def test_perception_remains_tenant_isolated() -> None:
 
     first_events = app.state.event_store.list_for_tenant(first_tenant)
     second_events = app.state.event_store.list_for_tenant(second_tenant)
-    assert len(first_events) == 7
-    assert len(second_events) == 7
+    assert len(first_events) == 8
+    assert len(second_events) == 8
     assert all(event.tenant_id == first_tenant for event in first_events)
     assert all(event.tenant_id == second_tenant for event in second_events)
 
@@ -365,7 +390,7 @@ def test_normalization_failure_preserves_perceived_without_normalized() -> None:
     ]
 
 
-def test_inspection_exposes_seven_events_and_health_is_unchanged() -> None:
+def test_inspection_exposes_eight_events_and_health_is_unchanged() -> None:
     tenant_id = unique_tenant("perception-inspection")
     _, handler = register_fake_perception()
     try:
@@ -391,6 +416,7 @@ def test_inspection_exposes_seven_events_and_health_is_unchanged() -> None:
         "conversation.next_action",
         "conversation.response_request",
         "conversation.response_generated",
+        "conversation.response_validated",
     ]
     assert [event["event_type"] for event in detail["events"]] == [
         "message.received",
@@ -400,6 +426,7 @@ def test_inspection_exposes_seven_events_and_health_is_unchanged() -> None:
         "conversation.next_action",
         "conversation.response_request",
         "conversation.response_generated",
+        "conversation.response_validated",
     ]
     assert health.json() == {
         "status": "ok",
@@ -548,9 +575,10 @@ def test_generated_response_policy_through_api(
 
     assert response.status_code == 201
     events = app.state.event_store.list_for_tenant(tenant_id)
-    next_action_payload = events[-3].to_dict()["payload"]
-    response_payload = events[-2].to_dict()["payload"]
-    generated_payload = events[-1].to_dict()["payload"]
+    next_action_payload = events[-4].to_dict()["payload"]
+    response_payload = events[-3].to_dict()["payload"]
+    generated_payload = events[-2].to_dict()["payload"]
+    validated_payload = events[-1].to_dict()["payload"]
     assert next_action_payload["action"] == action
     assert response_payload["response_type"] == response_type
     assert response_payload["target_language"] == "es"
@@ -563,6 +591,12 @@ def test_generated_response_policy_through_api(
     assert (
         generated_payload["generation_method"]
         == "deterministic_template"
+    )
+    assert validated_payload["response_type"] == response_type
+    assert validated_payload["language"] == "es"
+    assert validated_payload["text"] == expected_text
+    assert validated_payload["validation_method"] == (
+        "deterministic_contract"
     )
 
 

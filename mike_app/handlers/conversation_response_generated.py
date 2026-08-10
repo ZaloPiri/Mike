@@ -8,6 +8,7 @@ from mike_app.conversation.response_generation import (
     DeterministicResponseGenerator,
 )
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.event import Event
 
@@ -17,6 +18,7 @@ class ConversationResponseGeneratedHandler:
         self,
         episode_coordinator: EpisodeCoordinator,
         response_generator: DeterministicResponseGenerator,
+        runtime_dispatcher: RuntimeDispatcher,
     ) -> None:
         if not isinstance(episode_coordinator, EpisodeCoordinator):
             raise TypeError(
@@ -32,6 +34,11 @@ class ConversationResponseGeneratedHandler:
             )
         self._episode_coordinator = episode_coordinator
         self._response_generator = response_generator
+        if not isinstance(runtime_dispatcher, RuntimeDispatcher):
+            raise TypeError(
+                "runtime_dispatcher must be a RuntimeDispatcher"
+            )
+        self._runtime_dispatcher = runtime_dispatcher
 
     def __call__(self, context: RuntimeContext) -> None:
         if not isinstance(context, RuntimeContext):
@@ -262,6 +269,9 @@ class ConversationResponseGeneratedHandler:
         self._episode_coordinator.append_to_episode(
             episode.episode_id,
             generated_event,
+        )
+        self._runtime_dispatcher.dispatch(
+            RuntimeContext.create(generated_event)
         )
 
     @staticmethod

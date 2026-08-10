@@ -9,6 +9,9 @@ from mike_app.conversation.response_generation import (
     DeterministicResponseGenerator,
 )
 from mike_app.conversation.response_planning import ResponseRequestPlanner
+from mike_app.conversation.response_validation import (
+    ConversationResponseValidator,
+)
 from mike_app.core.settings import get_settings
 from mike_app.handlers.conversation_next_action import (
     ConversationNextActionHandler,
@@ -18,6 +21,9 @@ from mike_app.handlers.conversation_response_request import (
 )
 from mike_app.handlers.conversation_response_generated import (
     ConversationResponseGeneratedHandler,
+)
+from mike_app.handlers.conversation_response_validated import (
+    ConversationResponseValidatedHandler,
 )
 from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
 from mike_app.handlers.message_perception import MessagePerceptionHandler
@@ -42,10 +48,22 @@ runtime_handler_registry = RuntimeHandlerRegistry()
 runtime_dispatcher = RuntimeDispatcher(runtime_handler_registry)
 settings = get_settings()
 deterministic_response_generator = DeterministicResponseGenerator()
+conversation_response_validator = ConversationResponseValidator()
+conversation_response_validated_handler = (
+    ConversationResponseValidatedHandler(
+        episode_coordinator,
+        conversation_response_validator,
+    )
+)
+runtime_handler_registry.register(
+    "conversation.response_generated",
+    conversation_response_validated_handler,
+)
 conversation_response_generated_handler = (
     ConversationResponseGeneratedHandler(
         episode_coordinator,
         deterministic_response_generator,
+        runtime_dispatcher,
     )
 )
 runtime_handler_registry.register(
@@ -149,6 +167,10 @@ app.state.conversation_response_request_handler = (
 )
 app.state.deterministic_response_generator = (
     deterministic_response_generator
+)
+app.state.conversation_response_validator = conversation_response_validator
+app.state.conversation_response_validated_handler = (
+    conversation_response_validated_handler
 )
 app.state.conversation_response_generated_handler = (
     conversation_response_generated_handler

@@ -9,10 +9,12 @@ from mike_app.handlers.conversation_response_generated import (
     ConversationResponseGeneratedHandler,
 )
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.episode_store import InMemoryEpisodeStore
 from mike_app.runtime.event import Event
 from mike_app.runtime.event_store import InMemoryEventStore
+from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
 class SpyGenerator(DeterministicResponseGenerator):
@@ -31,10 +33,12 @@ def make_components():
     event_store = InMemoryEventStore()
     episode_store = InMemoryEpisodeStore()
     coordinator = EpisodeCoordinator(event_store, episode_store)
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
     generator = SpyGenerator()
     handler = ConversationResponseGeneratedHandler(
         coordinator,
         generator,
+        dispatcher,
     )
     return event_store, episode_store, coordinator, generator, handler
 
@@ -175,28 +179,42 @@ def append_chain(
 
 def test_constructor_and_callable_interface() -> None:
     _, _, coordinator, generator, _ = make_components()
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
 
     handler = ConversationResponseGeneratedHandler(
         coordinator,
         generator,
+        dispatcher,
     )
 
     assert handler._episode_coordinator is coordinator
     assert handler._response_generator is generator
+    assert handler._runtime_dispatcher is dispatcher
     assert callable(handler)
 
 
 @pytest.mark.parametrize(
-    ("coordinator", "generator", "match"),
+    ("coordinator", "generator", "dispatcher", "match"),
     [
-        (None, DeterministicResponseGenerator(), "EpisodeCoordinator"),
-        (object(), DeterministicResponseGenerator(), "EpisodeCoordinator"),
+        (
+            None,
+            DeterministicResponseGenerator(),
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
+            "EpisodeCoordinator",
+        ),
+        (
+            object(),
+            DeterministicResponseGenerator(),
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
+            "EpisodeCoordinator",
+        ),
         (
             EpisodeCoordinator(
                 InMemoryEventStore(),
                 InMemoryEpisodeStore(),
             ),
             None,
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
             "DeterministicResponseGenerator",
         ),
         (
@@ -205,17 +223,32 @@ def test_constructor_and_callable_interface() -> None:
                 InMemoryEpisodeStore(),
             ),
             object(),
+            RuntimeDispatcher(RuntimeHandlerRegistry()),
             "DeterministicResponseGenerator",
+        ),
+        (
+            EpisodeCoordinator(
+                InMemoryEventStore(),
+                InMemoryEpisodeStore(),
+            ),
+            DeterministicResponseGenerator(),
+            None,
+            "RuntimeDispatcher",
         ),
     ],
 )
 def test_constructor_validation(
     coordinator: object,
     generator: object,
+    dispatcher: object,
     match: str,
 ) -> None:
     with pytest.raises(TypeError, match=match):
-        ConversationResponseGeneratedHandler(coordinator, generator)
+        ConversationResponseGeneratedHandler(
+            coordinator,
+            generator,
+            dispatcher,
+        )
 
 
 @pytest.mark.parametrize("context", [None, object()])
@@ -638,6 +671,79 @@ def test_generator_failure_creates_no_generated_event() -> None:
 
     assert exc_info.value is error
     assert len(event_store.list_for_tenant("tenant-1")) == 6
+
+
+def test_generated_event_is_appended_before_single_dispatch() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    observed: list[RuntimeContext] = []
+
+    def downstream(context: RuntimeContext) -> None:
+        stored = event_store.get_by_id(
+            context.event.tenant_id,
+            context.event.event_id,
+        )
+        assert stored is context.event
+        episode = coordinator.find_episode_for_event(
+            context.event.tenant_id,
+            context.event.event_id,
+        )
+        assert episode is not None
+        observed.append(context)
+
+    registry.register("conversation.response_generated", downstream)
+    handler = ConversationResponseGeneratedHandler(
+        coordinator,
+        DeterministicResponseGenerator(),
+        dispatcher,
+    )
+    *_, response_request = append_chain(coordinator)
+
+    handler(RuntimeContext.create(response_request))
+
+    assert len(observed) == 1
+    assert observed[0].event.event_type == (
+        "conversation.response_generated"
+    )
+
+
+def test_validation_dispatch_failure_preserves_generated_without_retry() -> None:
+    event_store = InMemoryEventStore()
+    episode_store = InMemoryEpisodeStore()
+    coordinator = EpisodeCoordinator(event_store, episode_store)
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    calls = 0
+    error = RuntimeError("validation failed")
+
+    def failing_downstream(context: RuntimeContext) -> None:
+        nonlocal calls
+        calls += 1
+        raise error
+
+    registry.register(
+        "conversation.response_generated",
+        failing_downstream,
+    )
+    handler = ConversationResponseGeneratedHandler(
+        coordinator,
+        DeterministicResponseGenerator(),
+        dispatcher,
+    )
+    *_, response_request = append_chain(coordinator)
+
+    with pytest.raises(RuntimeError, match="validation failed") as exc_info:
+        handler(RuntimeContext.create(response_request))
+
+    assert exc_info.value is error
+    assert calls == 1
+    assert [event.event_type for event in event_store.list_for_tenant(
+        "tenant-1"
+    )][-1] == "conversation.response_generated"
+    assert len(event_store.list_for_tenant("tenant-1")) == 7
 
 
 def test_repeated_invocation_has_no_deduplication() -> None:
