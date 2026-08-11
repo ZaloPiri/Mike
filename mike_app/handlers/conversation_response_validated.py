@@ -7,6 +7,7 @@ from mike_app.conversation.response_validation import (
     ConversationResponseValidator,
 )
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.event import Event
 
@@ -16,6 +17,7 @@ class ConversationResponseValidatedHandler:
         self,
         episode_coordinator: EpisodeCoordinator,
         response_validator: ConversationResponseValidator,
+        runtime_dispatcher: RuntimeDispatcher,
     ) -> None:
         if not isinstance(episode_coordinator, EpisodeCoordinator):
             raise TypeError(
@@ -31,6 +33,11 @@ class ConversationResponseValidatedHandler:
             )
         self._episode_coordinator = episode_coordinator
         self._response_validator = response_validator
+        if not isinstance(runtime_dispatcher, RuntimeDispatcher):
+            raise TypeError(
+                "runtime_dispatcher must be a RuntimeDispatcher"
+            )
+        self._runtime_dispatcher = runtime_dispatcher
 
     def __call__(self, context: RuntimeContext) -> None:
         if not isinstance(context, RuntimeContext):
@@ -123,6 +130,9 @@ class ConversationResponseValidatedHandler:
         self._episode_coordinator.append_to_episode(
             episode.episode_id,
             validated_event,
+        )
+        self._runtime_dispatcher.dispatch(
+            RuntimeContext.create(validated_event)
         )
 
     def _get_event(

@@ -9,10 +9,12 @@ from mike_app.handlers.conversation_response_validated import (
     ConversationResponseValidatedHandler,
 )
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.episode_store import InMemoryEpisodeStore
 from mike_app.runtime.event import Event
 from mike_app.runtime.event_store import InMemoryEventStore
+from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 from tests.test_conversation_response_validation import build_chain
 
 
@@ -32,9 +34,11 @@ def make_handler():
     chain = build_chain()
     event_store, episode_store, coordinator = chain[:3]
     validator = SpyValidator()
+    dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
     handler = ConversationResponseValidatedHandler(
         coordinator,
         validator,
+        dispatcher,
     )
     return event_store, episode_store, validator, handler, chain
 
@@ -169,3 +173,70 @@ def test_wrong_initial_event_type_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="response_generated"):
         handler(RuntimeContext.create(wrong))
+
+
+def test_validated_event_is_appended_before_single_dispatch() -> None:
+    chain = build_chain()
+    event_store, _, coordinator = chain[:3]
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    observed: list[RuntimeContext] = []
+
+    def downstream(context: RuntimeContext) -> None:
+        assert event_store.get_by_id(
+            context.event.tenant_id,
+            context.event.event_id,
+        ) is context.event
+        assert coordinator.find_episode_for_event(
+            context.event.tenant_id,
+            context.event.event_id,
+        ) is not None
+        observed.append(context)
+
+    registry.register("conversation.response_validated", downstream)
+    handler = ConversationResponseValidatedHandler(
+        coordinator,
+        ConversationResponseValidator(),
+        dispatcher,
+    )
+
+    handler(RuntimeContext.create(chain[-1]))
+
+    assert len(observed) == 1
+    assert observed[0].event.event_type == "conversation.response_validated"
+
+
+def test_target_dispatch_failure_preserves_eighth_event_without_retry() -> None:
+    chain = build_chain()
+    event_store, _, coordinator = chain[:3]
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    calls = 0
+    error = RuntimeError("target resolution failed")
+
+    def failing_downstream(context: RuntimeContext) -> None:
+        nonlocal calls
+        calls += 1
+        raise error
+
+    registry.register(
+        "conversation.response_validated",
+        failing_downstream,
+    )
+    handler = ConversationResponseValidatedHandler(
+        coordinator,
+        ConversationResponseValidator(),
+        dispatcher,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="target resolution failed",
+    ) as exc_info:
+        handler(RuntimeContext.create(chain[-1]))
+
+    assert exc_info.value is error
+    assert calls == 1
+    events = event_store.list_for_tenant("tenant-1")
+    assert len(events) == 8
+    assert events[-1].event_type == "conversation.response_validated"

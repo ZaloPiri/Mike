@@ -52,7 +52,17 @@ def test_events_endpoint_returns_safe_events_in_insertion_order() -> None:
         "message.received",
         "message.accepted",
     ]
-    assert events[0]["payload"] == {"text": text}
+    source_payload = events[0]["payload"]
+    assert source_payload == {
+        "text": text,
+        "channel": "development",
+        "external_message_id": source_payload["external_message_id"],
+        "external_conversation_id": (
+            source_payload["external_conversation_id"]
+        ),
+        "sender_id": "development-user",
+        "recipient_id": tenant_id,
+    }
     assert events[1]["payload"] == {
         "source_event_id": events[0]["event_id"],
     }
@@ -83,7 +93,7 @@ def test_event_reads_preserve_state_and_payload_is_a_safe_copy() -> None:
     first[0]["payload"]["text"] = "changed"
     second = client.get(f"/dev/tenants/{tenant_id}/events").json()
 
-    assert second[0]["payload"] == {"text": "original"}
+    assert second[0]["payload"]["text"] == "original"
     assert app.state.event_store.total_count() == event_count
     assert app.state.episode_store.total_count() == episode_count
 

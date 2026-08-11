@@ -45,7 +45,13 @@ def test_valid_text_is_preserved_without_inferred_behavior() -> None:
     event_id = uuid.UUID(response.json()["event_id"])
     stored_event = app.state.event_store.get_by_id("tenant-preserve", event_id)
     assert stored_event is not None
-    assert stored_event.to_dict()["payload"] == {"text": text}
+    payload = stored_event.to_dict()["payload"]
+    assert payload["text"] == text
+    assert payload["channel"] == "development"
+    assert uuid.UUID(payload["external_message_id"])
+    assert uuid.UUID(payload["external_conversation_id"])
+    assert payload["sender_id"] == "development-user"
+    assert payload["recipient_id"] == "tenant-preserve"
 
 
 @pytest.mark.parametrize(
@@ -116,7 +122,19 @@ def test_one_request_stores_received_and_accepted_events_in_one_episode() -> Non
     assert new_events[0].event_id == event_id
     assert new_events[0].tenant_id == tenant_id
     assert new_events[0].event_type == "message.received"
-    assert new_events[0].to_dict()["payload"] == {"text": "Only this text"}
+    source_payload = new_events[0].to_dict()["payload"]
+    assert source_payload == {
+        "text": "Only this text",
+        "channel": "development",
+        "external_message_id": source_payload["external_message_id"],
+        "external_conversation_id": (
+            source_payload["external_conversation_id"]
+        ),
+        "sender_id": "development-user",
+        "recipient_id": tenant_id,
+    }
+    assert uuid.UUID(source_payload["external_message_id"])
+    assert uuid.UUID(source_payload["external_conversation_id"])
     assert new_events[1].tenant_id == tenant_id
     assert new_events[1].event_type == "message.accepted"
     assert new_events[1].to_dict()["payload"] == {
@@ -148,6 +166,24 @@ def test_repeated_requests_create_distinct_events_and_episodes() -> None:
     assert len(first_episode.event_ids) == 2
     assert len(second_episode.event_ids) == 2
     assert set(first_episode.event_ids).isdisjoint(second_episode.event_ids)
+    first_source = app.state.event_store.get_by_id(
+        "tenant-repeated",
+        uuid.UUID(first["event_id"]),
+    )
+    second_source = app.state.event_store.get_by_id(
+        "tenant-repeated",
+        uuid.UUID(second["event_id"]),
+    )
+    assert first_source is not None
+    assert second_source is not None
+    assert (
+        first_source.payload["external_message_id"]
+        != second_source.payload["external_message_id"]
+    )
+    assert (
+        first_source.payload["external_conversation_id"]
+        != second_source.payload["external_conversation_id"]
+    )
 
 
 def test_requests_from_different_tenants_remain_isolated() -> None:

@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Request, status
 from pydantic import BaseModel, field_validator
 
+from mike_app.communication.target_resolution import CommunicationContext
 from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
@@ -44,10 +45,29 @@ def receive_local_message(
     episode_coordinator: EpisodeCoordinator = request.app.state.episode_coordinator
     runtime_dispatcher: RuntimeDispatcher = request.app.state.runtime_dispatcher
 
+    communication_context = CommunicationContext(
+        channel="development",
+        external_message_id=str(uuid.uuid4()),
+        external_conversation_id=str(uuid.uuid4()),
+        sender_id="development-user",
+        recipient_id=message.tenant_id,
+    )
+
     event = Event.create(
         tenant_id=message.tenant_id,
         event_type="message.received",
-        payload={"text": message.text},
+        payload={
+            "text": message.text,
+            "channel": communication_context.channel,
+            "external_message_id": (
+                communication_context.external_message_id
+            ),
+            "external_conversation_id": (
+                communication_context.external_conversation_id
+            ),
+            "sender_id": communication_context.sender_id,
+            "recipient_id": communication_context.recipient_id,
+        },
     )
     episode = episode_coordinator.start_episode(event)
     context = RuntimeContext.create(event)

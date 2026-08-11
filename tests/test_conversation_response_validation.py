@@ -22,14 +22,23 @@ def build_chain(
     response_type: object = "intent_response",
     request_response_type: object = "intent_response",
     generation_method: object = "deterministic_template",
+    communication_context_values: dict[str, object] | None = None,
 ):
     event_store = InMemoryEventStore()
     episode_store = InMemoryEpisodeStore()
     coordinator = EpisodeCoordinator(event_store, episode_store)
+    communication_context = {
+        "channel": "development",
+        "external_message_id": "message-id",
+        "external_conversation_id": "conversation-id",
+        "sender_id": "development-user",
+        "recipient_id": tenant_id,
+    }
+    communication_context.update(communication_context_values or {})
     source = Event.create(
         tenant_id=tenant_id,
         event_type="message.received",
-        payload={"text": "Hola"},
+        payload={"text": "Hola", **communication_context},
     )
     initial_episode = coordinator.start_episode(source)
     accepted = Event.create(

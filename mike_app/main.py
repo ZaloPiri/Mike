@@ -4,6 +4,9 @@ from openai import OpenAI
 from mike_app.api.dev_inspection import router as dev_inspection_router
 from mike_app.api.dev_messages import router as dev_messages_router
 from mike_app.api.health import router as health_router
+from mike_app.communication.target_resolution import (
+    ConversationResponseTargetResolver,
+)
 from mike_app.conversation.action_planning import ConversationActionPlanner
 from mike_app.conversation.response_generation import (
     DeterministicResponseGenerator,
@@ -24,6 +27,9 @@ from mike_app.handlers.conversation_response_generated import (
 )
 from mike_app.handlers.conversation_response_validated import (
     ConversationResponseValidatedHandler,
+)
+from mike_app.handlers.conversation_response_target_resolved import (
+    ConversationResponseTargetResolvedHandler,
 )
 from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
 from mike_app.handlers.message_perception import MessagePerceptionHandler
@@ -49,10 +55,24 @@ runtime_dispatcher = RuntimeDispatcher(runtime_handler_registry)
 settings = get_settings()
 deterministic_response_generator = DeterministicResponseGenerator()
 conversation_response_validator = ConversationResponseValidator()
+conversation_response_target_resolver = (
+    ConversationResponseTargetResolver()
+)
+conversation_response_target_resolved_handler = (
+    ConversationResponseTargetResolvedHandler(
+        episode_coordinator,
+        conversation_response_target_resolver,
+    )
+)
+runtime_handler_registry.register(
+    "conversation.response_validated",
+    conversation_response_target_resolved_handler,
+)
 conversation_response_validated_handler = (
     ConversationResponseValidatedHandler(
         episode_coordinator,
         conversation_response_validator,
+        runtime_dispatcher,
     )
 )
 runtime_handler_registry.register(
@@ -169,6 +189,12 @@ app.state.deterministic_response_generator = (
     deterministic_response_generator
 )
 app.state.conversation_response_validator = conversation_response_validator
+app.state.conversation_response_target_resolver = (
+    conversation_response_target_resolver
+)
+app.state.conversation_response_target_resolved_handler = (
+    conversation_response_target_resolved_handler
+)
 app.state.conversation_response_validated_handler = (
     conversation_response_validated_handler
 )
