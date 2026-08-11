@@ -10,6 +10,7 @@ from mike_app.conversation.response_validation import (
     ValidatedConversationResponse,
 )
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 from mike_app.runtime.event import Event
 
@@ -19,6 +20,7 @@ class ConversationResponseTargetResolvedHandler:
         self,
         episode_coordinator: EpisodeCoordinator,
         response_target_resolver: ConversationResponseTargetResolver,
+        runtime_dispatcher: RuntimeDispatcher,
     ) -> None:
         if not isinstance(episode_coordinator, EpisodeCoordinator):
             raise TypeError(
@@ -34,6 +36,11 @@ class ConversationResponseTargetResolvedHandler:
             )
         self._episode_coordinator = episode_coordinator
         self._response_target_resolver = response_target_resolver
+        if not isinstance(runtime_dispatcher, RuntimeDispatcher):
+            raise TypeError(
+                "runtime_dispatcher must be a RuntimeDispatcher"
+            )
+        self._runtime_dispatcher = runtime_dispatcher
 
     def __call__(self, context: RuntimeContext) -> None:
         if not isinstance(context, RuntimeContext):
@@ -194,6 +201,9 @@ class ConversationResponseTargetResolvedHandler:
         self._episode_coordinator.append_to_episode(
             episode.episode_id,
             target_resolved_event,
+        )
+        self._runtime_dispatcher.dispatch(
+            RuntimeContext.create(target_resolved_event)
         )
 
     @staticmethod

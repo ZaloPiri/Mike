@@ -10,7 +10,9 @@ from mike_app.handlers.conversation_response_target_resolved import (
     ConversationResponseTargetResolvedHandler,
 )
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.event import Event
+from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 from tests.test_conversation_response_validation import build_chain
 
 
@@ -67,6 +69,7 @@ def make_handler(**kwargs: object):
     handler = ConversationResponseTargetResolvedHandler(
         chain[2],
         resolver,
+        RuntimeDispatcher(RuntimeHandlerRegistry()),
     )
     return chain, resolver, handler
 
@@ -272,3 +275,69 @@ def test_two_tenants_resolve_only_their_own_contexts() -> None:
     assert second_target.payload["outbound_sender_id"] == "tenant-two"
     assert first[2].get_event("tenant-one", second_target.event_id) is None
     assert second[2].get_event("tenant-two", first_target.event_id) is None
+
+
+def test_target_is_appended_before_single_dispatch() -> None:
+    chain = build_eight_event_chain()
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    observed: list[RuntimeContext] = []
+
+    def downstream(context: RuntimeContext) -> None:
+        assert chain[0].get_by_id(
+            context.event.tenant_id,
+            context.event.event_id,
+        ) is context.event
+        assert chain[2].find_episode_for_event(
+            context.event.tenant_id,
+            context.event.event_id,
+        ) is not None
+        observed.append(context)
+
+    registry.register("communication.response_target_resolved", downstream)
+    handler = ConversationResponseTargetResolvedHandler(
+        chain[2],
+        ConversationResponseTargetResolver(),
+        dispatcher,
+    )
+
+    handler(RuntimeContext.create(chain[-1]))
+
+    assert len(observed) == 1
+    assert observed[0].event.event_type == (
+        "communication.response_target_resolved"
+    )
+
+
+def test_readiness_dispatch_failure_preserves_ninth_without_retry() -> None:
+    chain = build_eight_event_chain()
+    registry = RuntimeHandlerRegistry()
+    dispatcher = RuntimeDispatcher(registry)
+    calls = 0
+    error = RuntimeError("readiness failed")
+
+    def failing_downstream(context: RuntimeContext) -> None:
+        nonlocal calls
+        calls += 1
+        raise error
+
+    registry.register(
+        "communication.response_target_resolved",
+        failing_downstream,
+    )
+    handler = ConversationResponseTargetResolvedHandler(
+        chain[2],
+        ConversationResponseTargetResolver(),
+        dispatcher,
+    )
+
+    with pytest.raises(RuntimeError, match="readiness failed") as exc_info:
+        handler(RuntimeContext.create(chain[-1]))
+
+    assert exc_info.value is error
+    assert calls == 1
+    events = chain[0].list_for_tenant("tenant-1")
+    assert len(events) == 9
+    assert events[-1].event_type == (
+        "communication.response_target_resolved"
+    )

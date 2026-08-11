@@ -126,10 +126,15 @@ def test_missing_configuration_is_explicit_and_import_is_network_free() -> None:
     assert app.state.conversation_response_target_resolved_handler is not None
     assert app.state.runtime_handler_registry.count_for_type(
         "communication.response_target_resolved"
+    ) == 1
+    assert app.state.conversation_response_readiness_evaluator is not None
+    assert app.state.conversation_response_ready_handler is not None
+    assert app.state.runtime_handler_registry.count_for_type(
+        "conversation.response_ready"
     ) == 0
 
 
-def test_successful_perception_preserves_response_and_stores_nine_events() -> None:
+def test_successful_perception_preserves_response_and_stores_ten_events() -> None:
     tenant_id = unique_tenant("perception-success")
     fake, handler = register_fake_perception()
     try:
@@ -159,6 +164,7 @@ def test_successful_perception_preserves_response_and_stores_nine_events() -> No
         "conversation.response_generated",
         "conversation.response_validated",
         "communication.response_target_resolved",
+        "conversation.response_ready",
     ]
     assert episodes[0].event_ids == tuple(
         event.event_id for event in events
@@ -241,6 +247,24 @@ def test_successful_perception_preserves_response_and_stores_nine_events() -> No
         "outbound_recipient_id": "development-user",
         "resolution_method": "reply_to_source",
     }
+    assert events[9].to_dict()["payload"] == {
+        "source_event_id": str(events[0].event_id),
+        "response_validated_event_id": str(events[7].event_id),
+        "response_target_resolved_event_id": str(events[8].event_id),
+        "response_type": events[7].payload["response_type"],
+        "language": events[7].payload["language"],
+        "text": events[7].payload["text"],
+        "channel": events[8].payload["channel"],
+        "external_message_id": events[8].payload["external_message_id"],
+        "external_conversation_id": events[8].payload[
+            "external_conversation_id"
+        ],
+        "outbound_sender_id": events[8].payload["outbound_sender_id"],
+        "outbound_recipient_id": events[8].payload[
+            "outbound_recipient_id"
+        ],
+        "readiness_method": "validated_response_with_resolved_target",
+    }
 
 
 def test_repeated_requests_create_independent_perceived_episodes() -> None:
@@ -269,8 +293,8 @@ def test_repeated_requests_create_independent_perceived_episodes() -> None:
     assert fake.calls == ["First", "Second"]
     assert first_episode is not None
     assert second_episode is not None
-    assert len(first_episode.event_ids) == 9
-    assert len(second_episode.event_ids) == 9
+    assert len(first_episode.event_ids) == 10
+    assert len(second_episode.event_ids) == 10
     assert set(first_episode.event_ids).isdisjoint(
         second_episode.event_ids
     )
@@ -294,8 +318,8 @@ def test_perception_remains_tenant_isolated() -> None:
 
     first_events = app.state.event_store.list_for_tenant(first_tenant)
     second_events = app.state.event_store.list_for_tenant(second_tenant)
-    assert len(first_events) == 9
-    assert len(second_events) == 9
+    assert len(first_events) == 10
+    assert len(second_events) == 10
     assert all(event.tenant_id == first_tenant for event in first_events)
     assert all(event.tenant_id == second_tenant for event in second_events)
 
@@ -409,7 +433,7 @@ def test_normalization_failure_preserves_perceived_without_normalized() -> None:
     ]
 
 
-def test_inspection_exposes_nine_events_and_health_is_unchanged() -> None:
+def test_inspection_exposes_ten_events_and_health_is_unchanged() -> None:
     tenant_id = unique_tenant("perception-inspection")
     _, handler = register_fake_perception()
     try:
@@ -437,6 +461,7 @@ def test_inspection_exposes_nine_events_and_health_is_unchanged() -> None:
         "conversation.response_generated",
         "conversation.response_validated",
         "communication.response_target_resolved",
+        "conversation.response_ready",
     ]
     assert [event["event_type"] for event in detail["events"]] == [
         "message.received",
@@ -448,6 +473,7 @@ def test_inspection_exposes_nine_events_and_health_is_unchanged() -> None:
         "conversation.response_generated",
         "conversation.response_validated",
         "communication.response_target_resolved",
+        "conversation.response_ready",
     ]
     assert health.json() == {
         "status": "ok",
@@ -596,11 +622,12 @@ def test_generated_response_policy_through_api(
 
     assert response.status_code == 201
     events = app.state.event_store.list_for_tenant(tenant_id)
-    next_action_payload = events[-5].to_dict()["payload"]
-    response_payload = events[-4].to_dict()["payload"]
-    generated_payload = events[-3].to_dict()["payload"]
-    validated_payload = events[-2].to_dict()["payload"]
-    target_payload = events[-1].to_dict()["payload"]
+    next_action_payload = events[-6].to_dict()["payload"]
+    response_payload = events[-5].to_dict()["payload"]
+    generated_payload = events[-4].to_dict()["payload"]
+    validated_payload = events[-3].to_dict()["payload"]
+    target_payload = events[-2].to_dict()["payload"]
+    ready_payload = events[-1].to_dict()["payload"]
     assert next_action_payload["action"] == action
     assert response_payload["response_type"] == response_type
     assert response_payload["target_language"] == "es"
@@ -621,6 +648,10 @@ def test_generated_response_policy_through_api(
         "deterministic_contract"
     )
     assert target_payload["resolution_method"] == "reply_to_source"
+    assert ready_payload["text"] == validated_payload["text"]
+    assert ready_payload["outbound_recipient_id"] == target_payload[
+        "outbound_recipient_id"
+    ]
 
 
 def test_planning_failure_preserves_first_four_events(

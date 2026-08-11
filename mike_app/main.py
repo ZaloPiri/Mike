@@ -7,6 +7,9 @@ from mike_app.api.health import router as health_router
 from mike_app.communication.target_resolution import (
     ConversationResponseTargetResolver,
 )
+from mike_app.communication.readiness import (
+    ConversationResponseReadinessEvaluator,
+)
 from mike_app.conversation.action_planning import ConversationActionPlanner
 from mike_app.conversation.response_generation import (
     DeterministicResponseGenerator,
@@ -30,6 +33,9 @@ from mike_app.handlers.conversation_response_validated import (
 )
 from mike_app.handlers.conversation_response_target_resolved import (
     ConversationResponseTargetResolvedHandler,
+)
+from mike_app.handlers.conversation_response_ready import (
+    ConversationResponseReadyHandler,
 )
 from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
 from mike_app.handlers.message_perception import MessagePerceptionHandler
@@ -55,6 +61,17 @@ runtime_dispatcher = RuntimeDispatcher(runtime_handler_registry)
 settings = get_settings()
 deterministic_response_generator = DeterministicResponseGenerator()
 conversation_response_validator = ConversationResponseValidator()
+conversation_response_readiness_evaluator = (
+    ConversationResponseReadinessEvaluator()
+)
+conversation_response_ready_handler = ConversationResponseReadyHandler(
+    episode_coordinator,
+    conversation_response_readiness_evaluator,
+)
+runtime_handler_registry.register(
+    "communication.response_target_resolved",
+    conversation_response_ready_handler,
+)
 conversation_response_target_resolver = (
     ConversationResponseTargetResolver()
 )
@@ -62,6 +79,7 @@ conversation_response_target_resolved_handler = (
     ConversationResponseTargetResolvedHandler(
         episode_coordinator,
         conversation_response_target_resolver,
+        runtime_dispatcher,
     )
 )
 runtime_handler_registry.register(
@@ -189,6 +207,12 @@ app.state.deterministic_response_generator = (
     deterministic_response_generator
 )
 app.state.conversation_response_validator = conversation_response_validator
+app.state.conversation_response_readiness_evaluator = (
+    conversation_response_readiness_evaluator
+)
+app.state.conversation_response_ready_handler = (
+    conversation_response_ready_handler
+)
 app.state.conversation_response_target_resolver = (
     conversation_response_target_resolver
 )
