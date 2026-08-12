@@ -9,9 +9,12 @@ from mike_app.perception.normalization import PerceptionNormalizer
 from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
+from mike_app.runtime.episode_journal import (
+    EpisodeJournalView,
+    EventJournalView,
+    InMemoryEpisodeJournal,
+)
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
@@ -28,15 +31,16 @@ class SpyNormalizer(PerceptionNormalizer):
 
 
 def make_components() -> tuple[
-    InMemoryEventStore,
-    InMemoryEpisodeStore,
+    EventJournalView,
+    EpisodeJournalView,
     EpisodeCoordinator,
     SpyNormalizer,
     PerceptionNormalizationHandler,
 ]:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     normalizer = SpyNormalizer()
     dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
     handler = PerceptionNormalizationHandler(
@@ -126,10 +130,7 @@ def test_constructor_rejects_invalid_coordinator(
 def test_constructor_rejects_invalid_normalizer(
     invalid_normalizer: object,
 ) -> None:
-    coordinator = EpisodeCoordinator(
-        InMemoryEventStore(),
-        InMemoryEpisodeStore(),
-    )
+    coordinator = EpisodeCoordinator(InMemoryEpisodeJournal())
 
     with pytest.raises(TypeError, match="PerceptionNormalizer"):
         PerceptionNormalizationHandler(
@@ -143,10 +144,7 @@ def test_constructor_rejects_invalid_normalizer(
 def test_constructor_rejects_invalid_dispatcher(
     invalid_dispatcher: object,
 ) -> None:
-    coordinator = EpisodeCoordinator(
-        InMemoryEventStore(),
-        InMemoryEpisodeStore(),
-    )
+    coordinator = EpisodeCoordinator(InMemoryEpisodeJournal())
 
     with pytest.raises(TypeError, match="RuntimeDispatcher"):
         PerceptionNormalizationHandler(
@@ -521,9 +519,10 @@ def test_repeated_explicit_invocation_adds_one_event_per_call() -> None:
 
 
 def test_dispatches_exact_normalized_context_once_after_append() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     normalizer = SpyNormalizer()
@@ -552,9 +551,10 @@ def test_dispatches_exact_normalized_context_once_after_append() -> None:
 
 
 def test_dispatch_failure_preserves_normalized_event_without_retry() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     calls = 0

@@ -183,7 +183,7 @@ def test_requires_exactly_nine_ordered_events(mutation: str) -> None:
         event_ids = episode.event_ids[:7] + (
             episode.event_ids[8], episode.event_ids[7]
         )
-    chain[1]._episodes_by_id[episode.episode_id] = replace(
+    chain[2]._episode_journal._episodes_by_id[episode.episode_id] = replace(
         episode, event_ids=event_ids
     )
 

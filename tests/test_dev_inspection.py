@@ -265,12 +265,32 @@ def test_missing_referenced_event_raises_internal_consistency_error() -> None:
         correlation_id=None,
         schema_version=1,
     )
-    app.state.episode_store.add(episode)
+    original_coordinator = app.state.episode_coordinator
 
-    with pytest.raises(RuntimeError, match="unavailable"):
-        client.get(
-            f"/dev/tenants/{tenant_id}/episodes/{episode.episode_id}"
-        )
+    class InconsistentCoordinator:
+        def get_episode(
+            self, requested_tenant_id: str, requested_episode_id: uuid.UUID
+        ) -> CognitiveEpisode | None:
+            if (
+                requested_tenant_id == tenant_id
+                and requested_episode_id == episode.episode_id
+            ):
+                return episode
+            return None
+
+        def get_event(
+            self, requested_tenant_id: str, event_id: uuid.UUID
+        ) -> None:
+            return None
+
+    app.state.episode_coordinator = InconsistentCoordinator()
+    try:
+        with pytest.raises(RuntimeError, match="unavailable"):
+            client.get(
+                f"/dev/tenants/{tenant_id}/episodes/{episode.episode_id}"
+            )
+    finally:
+        app.state.episode_coordinator = original_coordinator
 
 
 def test_no_inspection_mutation_methods_exist() -> None:

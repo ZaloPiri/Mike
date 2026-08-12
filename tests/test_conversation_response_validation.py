@@ -8,9 +8,12 @@ from mike_app.conversation.response_validation import (
     ValidatedConversationResponse,
 )
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
+from mike_app.runtime.episode_journal import (
+    EpisodeJournalView,
+    EventJournalView,
+    InMemoryEpisodeJournal,
+)
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
 
 
 def build_chain(
@@ -24,9 +27,10 @@ def build_chain(
     generation_method: object = "deterministic_template",
     communication_context_values: dict[str, object] | None = None,
 ):
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     communication_context = {
         "channel": "development",
         "external_message_id": "message-id",

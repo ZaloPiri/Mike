@@ -9,9 +9,12 @@ from mike_app.handlers.conversation_response_request import (
 from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
+from mike_app.runtime.episode_journal import (
+    EpisodeJournalView,
+    EventJournalView,
+    InMemoryEpisodeJournal,
+)
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
@@ -28,9 +31,10 @@ class SpyPlanner(ResponseRequestPlanner):
 
 
 def make_components():
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     planner = SpyPlanner()
     dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
     handler = ConversationResponseRequestHandler(
@@ -141,18 +145,12 @@ def test_constructor_and_callable_interface() -> None:
         (None, ResponseRequestPlanner(), "EpisodeCoordinator"),
         (object(), ResponseRequestPlanner(), "EpisodeCoordinator"),
         (
-            EpisodeCoordinator(
-                InMemoryEventStore(),
-                InMemoryEpisodeStore(),
-            ),
+            EpisodeCoordinator(InMemoryEpisodeJournal()),
             None,
             "ResponseRequestPlanner",
         ),
         (
-            EpisodeCoordinator(
-                InMemoryEventStore(),
-                InMemoryEpisodeStore(),
-            ),
+            EpisodeCoordinator(InMemoryEpisodeJournal()),
             object(),
             "ResponseRequestPlanner",
         ),
@@ -175,10 +173,7 @@ def test_constructor_validation(
 def test_constructor_rejects_invalid_dispatcher(
     dispatcher: object,
 ) -> None:
-    coordinator = EpisodeCoordinator(
-        InMemoryEventStore(),
-        InMemoryEpisodeStore(),
-    )
+    coordinator = EpisodeCoordinator(InMemoryEpisodeJournal())
 
     with pytest.raises(TypeError, match="RuntimeDispatcher"):
         ConversationResponseRequestHandler(
@@ -536,9 +531,10 @@ def test_repeated_invocation_has_no_deduplication() -> None:
 
 
 def test_dispatches_exact_response_request_once_after_append() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     observed_contexts: list[RuntimeContext] = []
@@ -566,9 +562,10 @@ def test_dispatches_exact_response_request_once_after_append() -> None:
 
 
 def test_dispatch_failure_preserves_response_request_without_retry() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     calls = 0

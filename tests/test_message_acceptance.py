@@ -4,22 +4,26 @@ from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
 from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
+from mike_app.runtime.episode_journal import (
+    EpisodeJournalView,
+    EventJournalView,
+    InMemoryEpisodeJournal,
+)
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
 def make_components() -> tuple[
-    InMemoryEventStore,
-    InMemoryEpisodeStore,
+    EventJournalView,
+    EpisodeJournalView,
     EpisodeCoordinator,
     RuntimeHandlerRegistry,
     MessageAcceptanceHandler,
 ]:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     handler = MessageAcceptanceHandler(coordinator, dispatcher)
@@ -27,10 +31,7 @@ def make_components() -> tuple[
 
 
 def test_constructor_accepts_coordinator_and_handler_is_callable() -> None:
-    coordinator = EpisodeCoordinator(
-        InMemoryEventStore(),
-        InMemoryEpisodeStore(),
-    )
+    coordinator = EpisodeCoordinator(InMemoryEpisodeJournal())
     dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
 
     handler = MessageAcceptanceHandler(coordinator, dispatcher)
@@ -55,10 +56,7 @@ def test_constructor_rejects_invalid_coordinator(
 def test_constructor_rejects_invalid_dispatcher(
     invalid_dispatcher: object,
 ) -> None:
-    coordinator = EpisodeCoordinator(
-        InMemoryEventStore(),
-        InMemoryEpisodeStore(),
-    )
+    coordinator = EpisodeCoordinator(InMemoryEpisodeJournal())
 
     with pytest.raises(TypeError, match="RuntimeDispatcher"):
         MessageAcceptanceHandler(coordinator, invalid_dispatcher)

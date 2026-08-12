@@ -8,9 +8,8 @@ from fastapi import APIRouter, HTTPException, Path, Request, status
 from pydantic import AfterValidator, BaseModel
 
 from mike_app.runtime.episode import CognitiveEpisode
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
+from mike_app.runtime.episode_coordinator import EpisodeCoordinator
 
 
 def _validate_tenant_id(value: str) -> str:
@@ -95,10 +94,10 @@ def list_tenant_events(
     tenant_id: TenantId,
     request: Request,
 ) -> list[DevEventResponse]:
-    event_store: InMemoryEventStore = request.app.state.event_store
+    coordinator: EpisodeCoordinator = request.app.state.episode_coordinator
     return [
         _event_response(event)
-        for event in event_store.list_for_tenant(tenant_id)
+        for event in coordinator.list_events(tenant_id)
     ]
 
 
@@ -110,10 +109,10 @@ def list_tenant_episodes(
     tenant_id: TenantId,
     request: Request,
 ) -> list[DevEpisodeSummaryResponse]:
-    episode_store: InMemoryEpisodeStore = request.app.state.episode_store
+    coordinator: EpisodeCoordinator = request.app.state.episode_coordinator
     return [
         _episode_summary(episode)
-        for episode in episode_store.list_for_tenant(tenant_id)
+        for episode in coordinator.list_episodes(tenant_id)
     ]
 
 
@@ -126,9 +125,8 @@ def get_tenant_episode(
     episode_id: uuid.UUID,
     request: Request,
 ) -> DevEpisodeDetailResponse:
-    event_store: InMemoryEventStore = request.app.state.event_store
-    episode_store: InMemoryEpisodeStore = request.app.state.episode_store
-    episode = episode_store.get_by_id(tenant_id, episode_id)
+    coordinator: EpisodeCoordinator = request.app.state.episode_coordinator
+    episode = coordinator.get_episode(tenant_id, episode_id)
     if episode is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -137,7 +135,7 @@ def get_tenant_episode(
 
     events: list[DevEventResponse] = []
     for event_id in episode.event_ids:
-        event = event_store.get_by_id(tenant_id, event_id)
+        event = coordinator.get_event(tenant_id, event_id)
         if event is None:
             raise RuntimeError(
                 "Episode references an Event unavailable to its tenant"

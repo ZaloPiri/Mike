@@ -230,7 +230,7 @@ def test_episode_must_contain_exactly_eight_ordered_events(
             episode.event_ids[7],
             episode.event_ids[6],
         )
-    episode_store._episodes_by_id[episode.episode_id] = replace(
+    chain[2]._episode_journal._episodes_by_id[episode.episode_id] = replace(
         episode,
         event_ids=event_ids,
     )

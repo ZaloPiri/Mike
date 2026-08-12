@@ -11,9 +11,12 @@ from mike_app.handlers.conversation_response_generated import (
 from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
+from mike_app.runtime.episode_journal import (
+    EpisodeJournalView,
+    EventJournalView,
+    InMemoryEpisodeJournal,
+)
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
@@ -30,9 +33,10 @@ class SpyGenerator(DeterministicResponseGenerator):
 
 
 def make_components():
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
     generator = SpyGenerator()
     handler = ConversationResponseGeneratedHandler(
@@ -209,28 +213,19 @@ def test_constructor_and_callable_interface() -> None:
             "EpisodeCoordinator",
         ),
         (
-            EpisodeCoordinator(
-                InMemoryEventStore(),
-                InMemoryEpisodeStore(),
-            ),
+            EpisodeCoordinator(InMemoryEpisodeJournal()),
             None,
             RuntimeDispatcher(RuntimeHandlerRegistry()),
             "DeterministicResponseGenerator",
         ),
         (
-            EpisodeCoordinator(
-                InMemoryEventStore(),
-                InMemoryEpisodeStore(),
-            ),
+            EpisodeCoordinator(InMemoryEpisodeJournal()),
             object(),
             RuntimeDispatcher(RuntimeHandlerRegistry()),
             "DeterministicResponseGenerator",
         ),
         (
-            EpisodeCoordinator(
-                InMemoryEventStore(),
-                InMemoryEpisodeStore(),
-            ),
+            EpisodeCoordinator(InMemoryEpisodeJournal()),
             DeterministicResponseGenerator(),
             None,
             "RuntimeDispatcher",
@@ -674,9 +669,10 @@ def test_generator_failure_creates_no_generated_event() -> None:
 
 
 def test_generated_event_is_appended_before_single_dispatch() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     observed: list[RuntimeContext] = []
@@ -711,9 +707,10 @@ def test_generated_event_is_appended_before_single_dispatch() -> None:
 
 
 def test_validation_dispatch_failure_preserves_generated_without_retry() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     calls = 0

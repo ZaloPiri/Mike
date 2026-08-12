@@ -9,9 +9,12 @@ from mike_app.handlers.conversation_next_action import (
 from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
+from mike_app.runtime.episode_journal import (
+    EpisodeJournalView,
+    EventJournalView,
+    InMemoryEpisodeJournal,
+)
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
@@ -28,9 +31,10 @@ class SpyPlanner(ConversationActionPlanner):
 
 
 def make_components():
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     planner = SpyPlanner()
     dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
     handler = ConversationNextActionHandler(
@@ -118,18 +122,12 @@ def test_constructor_and_callable_interface() -> None:
         (None, ConversationActionPlanner(), "EpisodeCoordinator"),
         (object(), ConversationActionPlanner(), "EpisodeCoordinator"),
         (
-            EpisodeCoordinator(
-                InMemoryEventStore(),
-                InMemoryEpisodeStore(),
-            ),
+            EpisodeCoordinator(InMemoryEpisodeJournal()),
             None,
             "ConversationActionPlanner",
         ),
         (
-            EpisodeCoordinator(
-                InMemoryEventStore(),
-                InMemoryEpisodeStore(),
-            ),
+            EpisodeCoordinator(InMemoryEpisodeJournal()),
             object(),
             "ConversationActionPlanner",
         ),
@@ -152,10 +150,7 @@ def test_constructor_validation(
 def test_constructor_rejects_invalid_dispatcher(
     dispatcher: object,
 ) -> None:
-    coordinator = EpisodeCoordinator(
-        InMemoryEventStore(),
-        InMemoryEpisodeStore(),
-    )
+    coordinator = EpisodeCoordinator(InMemoryEpisodeJournal())
 
     with pytest.raises(TypeError, match="RuntimeDispatcher"):
         ConversationNextActionHandler(
@@ -473,9 +468,10 @@ def test_repeated_invocation_has_no_deduplication() -> None:
 
 
 def test_dispatches_exact_next_action_context_once_after_append() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     observed_contexts: list[RuntimeContext] = []
@@ -503,9 +499,10 @@ def test_dispatches_exact_next_action_context_once_after_append() -> None:
 
 
 def test_dispatch_failure_preserves_next_action_without_retry() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
     calls = 0

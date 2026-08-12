@@ -47,15 +47,19 @@ from mike_app.perception.openai_client import OpenAIPerceptionClient
 from mike_app.perception.service import PerceptionService
 from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
-from mike_app.runtime.event_store import InMemoryEventStore
+from mike_app.runtime.episode_journal import (
+    EpisodeJournalView,
+    EventJournalView,
+    InMemoryEpisodeJournal,
+)
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 app = FastAPI(title="MIKE", version="0.1.0")
 
-event_store = InMemoryEventStore()
-episode_store = InMemoryEpisodeStore()
-episode_coordinator = EpisodeCoordinator(event_store, episode_store)
+episode_journal = InMemoryEpisodeJournal()
+event_store = EventJournalView(episode_journal)
+episode_store = EpisodeJournalView(episode_journal)
+episode_coordinator = EpisodeCoordinator(episode_journal)
 runtime_handler_registry = RuntimeHandlerRegistry()
 runtime_dispatcher = RuntimeDispatcher(runtime_handler_registry)
 settings = get_settings()

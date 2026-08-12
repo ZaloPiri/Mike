@@ -8,9 +8,12 @@ from mike_app.perception.service import PerceptionService
 from mike_app.runtime.context import RuntimeContext
 from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
+from mike_app.runtime.episode_journal import (
+    EpisodeJournalView,
+    EventJournalView,
+    InMemoryEpisodeJournal,
+)
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 
 
@@ -33,15 +36,16 @@ class FakePerceptionClient:
 
 
 def make_components() -> tuple[
-    InMemoryEventStore,
-    InMemoryEpisodeStore,
+    EventJournalView,
+    EpisodeJournalView,
     EpisodeCoordinator,
     FakePerceptionClient,
     MessagePerceptionHandler,
 ]:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     client = FakePerceptionClient()
     service = PerceptionService(client)
     dispatcher = RuntimeDispatcher(RuntimeHandlerRegistry())
@@ -105,10 +109,7 @@ def test_constructor_rejects_invalid_coordinator(
 def test_constructor_rejects_invalid_service(
     invalid_service: object,
 ) -> None:
-    coordinator = EpisodeCoordinator(
-        InMemoryEventStore(),
-        InMemoryEpisodeStore(),
-    )
+    coordinator = EpisodeCoordinator(InMemoryEpisodeJournal())
 
     with pytest.raises(TypeError, match="PerceptionService"):
         MessagePerceptionHandler(
@@ -122,10 +123,7 @@ def test_constructor_rejects_invalid_service(
 def test_constructor_rejects_invalid_dispatcher(
     invalid_dispatcher: object,
 ) -> None:
-    coordinator = EpisodeCoordinator(
-        InMemoryEventStore(),
-        InMemoryEpisodeStore(),
-    )
+    coordinator = EpisodeCoordinator(InMemoryEpisodeJournal())
     service = PerceptionService(FakePerceptionClient())
 
     with pytest.raises(TypeError, match="RuntimeDispatcher"):
@@ -350,9 +348,10 @@ def test_repeated_explicit_invocation_adds_one_perceived_event_each() -> None:
 
 
 def test_dispatches_exact_perceived_context_once_after_append() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     client = FakePerceptionClient()
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)
@@ -382,9 +381,10 @@ def test_dispatches_exact_perceived_context_once_after_append() -> None:
 
 
 def test_dispatch_failure_leaves_perceived_stored_without_retry() -> None:
-    event_store = InMemoryEventStore()
-    episode_store = InMemoryEpisodeStore()
-    coordinator = EpisodeCoordinator(event_store, episode_store)
+    journal = InMemoryEpisodeJournal()
+    event_store = EventJournalView(journal)
+    episode_store = EpisodeJournalView(journal)
+    coordinator = EpisodeCoordinator(journal)
     client = FakePerceptionClient()
     registry = RuntimeHandlerRegistry()
     dispatcher = RuntimeDispatcher(registry)

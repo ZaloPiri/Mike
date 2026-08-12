@@ -3,24 +3,16 @@ from __future__ import annotations
 import uuid
 
 from mike_app.runtime.episode import CognitiveEpisode
-from mike_app.runtime.episode_store import InMemoryEpisodeStore
+from mike_app.runtime.episode_journal import EpisodeJournal
 from mike_app.runtime.event import Event
-from mike_app.runtime.event_store import InMemoryEventStore
 
 
 class EpisodeCoordinator:
     def __init__(
         self,
-        event_store: InMemoryEventStore,
-        episode_store: InMemoryEpisodeStore,
+        episode_journal: EpisodeJournal,
     ) -> None:
-        if not isinstance(event_store, InMemoryEventStore):
-            raise TypeError("event_store must be an InMemoryEventStore")
-        if not isinstance(episode_store, InMemoryEpisodeStore):
-            raise TypeError("episode_store must be an InMemoryEpisodeStore")
-
-        self._event_store = event_store
-        self._episode_store = episode_store
+        self._episode_journal = episode_journal
 
     def start_episode(
         self,
@@ -31,9 +23,7 @@ class EpisodeCoordinator:
             raise TypeError("event must be an Event instance")
 
         episode = CognitiveEpisode.create(event, correlation_id=correlation_id)
-        self._event_store.append(event)
-        self._episode_store.add(episode)
-        return episode
+        return self._episode_journal.create_episode_with_event(episode, event)
 
     def append_to_episode(
         self,
@@ -45,14 +35,18 @@ class EpisodeCoordinator:
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
 
-        episode = self._episode_store.get_by_id(event.tenant_id, episode_id)
+        episode = self._episode_journal.get_episode(
+            event.tenant_id, episode_id
+        )
         if episode is None:
             raise ValueError("episode not found")
 
-        new_episode = episode.add_event(event)
-        self._event_store.append(event)
-        self._episode_store.update(new_episode)
-        return new_episode
+        return self._episode_journal.append_event(
+            event.tenant_id,
+            episode_id,
+            event,
+            episode.event_ids,
+        )
 
     def find_episode_for_event(
         self,
@@ -66,7 +60,7 @@ class EpisodeCoordinator:
         if not isinstance(event_id, uuid.UUID):
             raise TypeError("event_id must be a uuid.UUID")
 
-        for episode in self._episode_store.list_for_tenant(tenant_id):
+        for episode in self._episode_journal.list_episodes(tenant_id):
             if event_id in episode.event_ids:
                 return episode
         return None
@@ -82,4 +76,24 @@ class EpisodeCoordinator:
             raise ValueError("tenant_id is required and must be non-empty")
         if not isinstance(event_id, uuid.UUID):
             raise TypeError("event_id must be a uuid.UUID")
-        return self._event_store.get_by_id(tenant_id, event_id)
+        return self._episode_journal.get_event(tenant_id, event_id)
+
+    def get_episode(
+        self,
+        tenant_id: str,
+        episode_id: uuid.UUID,
+    ) -> CognitiveEpisode | None:
+        return self._episode_journal.get_episode(tenant_id, episode_id)
+
+    def list_events(
+        self,
+        tenant_id: str,
+        event_type: str | None = None,
+    ) -> tuple[Event, ...]:
+        return self._episode_journal.list_events(tenant_id, event_type)
+
+    def list_episodes(
+        self,
+        tenant_id: str,
+    ) -> tuple[CognitiveEpisode, ...]:
+        return self._episode_journal.list_episodes(tenant_id)
