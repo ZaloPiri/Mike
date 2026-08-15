@@ -1,13 +1,20 @@
 import uuid
 
 import pytest
-from fastapi.testclient import TestClient
 
-from mike_app.main import app
 from mike_app.runtime.context import RuntimeContext
 
 
-client = TestClient(app)
+app = None
+client = None
+
+
+@pytest.fixture(scope="module", autouse=True)
+def bind_memory_app(memory_app, memory_client):
+    global app, client
+    app = memory_app
+    client = memory_client
+    yield
 
 
 def post_message(

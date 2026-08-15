@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,6 +10,8 @@ from typing import Any
 
 
 def _freeze_json_compatible(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("payload must contain only finite numbers")
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if isinstance(value, Mapping):
@@ -46,6 +49,8 @@ class Event:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
+        if not isinstance(self.event_id, uuid.UUID):
+            raise ValueError("event_id must be a uuid.UUID")
         if not self.tenant_id or self.tenant_id.strip() == "":
             raise ValueError("tenant_id is required and must be non-empty")
         if not self.event_type or self.event_type.strip() == "":

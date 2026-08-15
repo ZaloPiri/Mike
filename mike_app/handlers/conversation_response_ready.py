@@ -65,7 +65,7 @@ class ConversationResponseReadyHandler:
             self._get_event(target_event.tenant_id, event_id)
             for event_id in episode.event_ids
         )
-        if events[-1] is not target_event:
+        if events[-1].event_id != target_event.event_id:
             raise ValueError(
                 "response-target-resolved Event must be ninth in the Episode"
             )

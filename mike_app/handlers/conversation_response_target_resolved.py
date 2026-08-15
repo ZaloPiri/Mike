@@ -75,7 +75,7 @@ class ConversationResponseTargetResolvedHandler:
             )
             for event_id in episode.event_ids
         )
-        if events[-1] is not response_validated_event:
+        if events[-1].event_id != response_validated_event.event_id:
             raise ValueError(
                 "response-validated Event must be eighth in the Episode"
             )

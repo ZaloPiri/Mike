@@ -1,9 +1,15 @@
-from fastapi.testclient import TestClient
+import pytest
 
-from mike_app.main import app
+app = None
+client = None
 
 
-client = TestClient(app)
+@pytest.fixture(scope="module", autouse=True)
+def bind_memory_app(memory_app, memory_client):
+    global app, client
+    app = memory_app
+    client = memory_client
+    yield
 
 
 def test_health_endpoint_returns_expected_payload() -> None:

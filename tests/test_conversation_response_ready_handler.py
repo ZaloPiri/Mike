@@ -104,6 +104,29 @@ def test_creates_exact_terminal_tenth_event_from_authoritative_events() -> None:
     assert episode.event_ids == tuple(event.event_id for event in events)
 
 
+def test_accepts_equivalent_reconstructed_target_event() -> None:
+    chain, evaluator, handler = make_handler()
+    stored = chain[-1]
+    reconstructed = Event(
+        event_id=stored.event_id,
+        tenant_id=stored.tenant_id,
+        event_type=stored.event_type,
+        occurred_at=stored.occurred_at,
+        payload=stored.to_dict()["payload"],
+        correlation_id=stored.correlation_id,
+        causation_id=stored.causation_id,
+        schema_version=stored.schema_version,
+    )
+
+    assert reconstructed is not stored
+    handler(RuntimeContext.create(reconstructed))
+
+    events = chain[0].list_for_tenant("tenant-1")
+    assert len(evaluator.calls) == 1
+    assert len(events) == 10
+    assert events[-1].payload["response_target_resolved_event_id"] == str(stored.event_id)
+
+
 def test_preserves_content_and_target_whitespace_exactly() -> None:
     chain, _, handler = make_handler()
     validated = chain[0].list_for_tenant("tenant-1")[7]
