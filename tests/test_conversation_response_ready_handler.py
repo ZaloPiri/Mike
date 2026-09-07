@@ -11,7 +11,9 @@ from mike_app.handlers.conversation_response_ready import (
     ConversationResponseReadyHandler,
 )
 from mike_app.runtime.context import RuntimeContext
+from mike_app.runtime.dispatcher import RuntimeDispatcher
 from mike_app.runtime.event import Event
+from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
 from tests.test_conversation_response_target_resolved_handler import (
     build_eight_event_chain,
 )
@@ -56,7 +58,9 @@ def build_nine_event_chain(*, tenant_id: str = "tenant-1"):
 def make_handler(*, tenant_id: str = "tenant-1"):
     chain = build_nine_event_chain(tenant_id=tenant_id)
     evaluator = SpyEvaluator()
-    handler = ConversationResponseReadyHandler(chain[2], evaluator)
+    handler = ConversationResponseReadyHandler(
+        chain[2], evaluator, RuntimeDispatcher(RuntimeHandlerRegistry())
+    )
     return chain, evaluator, handler
 
 

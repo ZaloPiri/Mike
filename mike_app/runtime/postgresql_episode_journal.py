@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     String,
+    Text,
     UniqueConstraint,
     func,
     inspect,
@@ -23,7 +24,12 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from mike_app.runtime.episode import CognitiveEpisode
-from mike_app.runtime.episode_journal import EpisodeConcurrencyConflictError
+from mike_app.runtime.delivery_outbox import DeliveryOutboxEntry
+from mike_app.runtime.episode_journal import (
+    EpisodeConcurrencyConflictError,
+    _reject_delivery_requested_for_ordinary_append,
+    _validate_delivery_append,
+)
 from mike_app.runtime.event import Event
 
 
@@ -62,6 +68,12 @@ class EventRow(Base):
             ["episodes.episode_id", "episodes.tenant_id"],
         ),
         UniqueConstraint("episode_id", "sequence"),
+        UniqueConstraint(
+            "event_id",
+            "episode_id",
+            "tenant_id",
+            name="uq_events_event_episode_tenant",
+        ),
         CheckConstraint("sequence >= 0"),
         CheckConstraint("schema_version > 0"),
         CheckConstraint("length(btrim(tenant_id)) > 0"),
@@ -83,6 +95,106 @@ class EventRow(Base):
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class DeliveryOutboxRow(Base):
+    __tablename__ = "delivery_outbox"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["episode_id", "tenant_id"],
+            ["episodes.episode_id", "episodes.tenant_id"],
+            name="fk_delivery_outbox_episode_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["delivery_request_event_id", "episode_id", "tenant_id"],
+            ["events.event_id", "events.episode_id", "events.tenant_id"],
+            name="fk_delivery_outbox_delivery_event_episode_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["response_ready_event_id", "episode_id", "tenant_id"],
+            ["events.event_id", "events.episode_id", "events.tenant_id"],
+            name="fk_delivery_outbox_ready_event_episode_tenant",
+        ),
+        UniqueConstraint(
+            "delivery_request_event_id",
+            name="uq_delivery_outbox_delivery_request_event_id",
+        ),
+        UniqueConstraint(
+            "response_ready_event_id",
+            name="uq_delivery_outbox_response_ready_event_id",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_delivery_outbox_idempotency_key",
+        ),
+        CheckConstraint(
+            "length(btrim(tenant_id)) > 0",
+            name="ck_delivery_outbox_tenant_non_empty",
+        ),
+        CheckConstraint(
+            "length(btrim(idempotency_key)) > 0",
+            name="ck_delivery_outbox_idempotency_key_non_empty",
+        ),
+        CheckConstraint(
+            "length(btrim(channel)) > 0",
+            name="ck_delivery_outbox_channel_non_empty",
+        ),
+        CheckConstraint(
+            "length(btrim(external_conversation_id)) > 0",
+            name="ck_delivery_outbox_conversation_non_empty",
+        ),
+        CheckConstraint(
+            "length(btrim(outbound_sender_id)) > 0",
+            name="ck_delivery_outbox_sender_non_empty",
+        ),
+        CheckConstraint(
+            "length(btrim(outbound_recipient_id)) > 0",
+            name="ck_delivery_outbox_recipient_non_empty",
+        ),
+        CheckConstraint(
+            "length(btrim(response_type)) > 0",
+            name="ck_delivery_outbox_response_type_non_empty",
+        ),
+        CheckConstraint(
+            "length(btrim(language)) > 0",
+            name="ck_delivery_outbox_language_non_empty",
+        ),
+        CheckConstraint(
+            "length(btrim(text)) > 0",
+            name="ck_delivery_outbox_text_non_empty",
+        ),
+        CheckConstraint(
+            "status = 'pending'",
+            name="ck_delivery_outbox_status_pending",
+        ),
+        CheckConstraint(
+            "schema_version > 0",
+            name="ck_delivery_outbox_schema_version_positive",
+        ),
+    )
+
+    outbox_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    episode_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    delivery_request_event_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    response_ready_event_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    external_conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    outbound_sender_id: Mapped[str] = mapped_column(Text, nullable=False)
+    outbound_recipient_id: Mapped[str] = mapped_column(Text, nullable=False)
+    response_type: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str] = mapped_column(Text, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class PostgreSQLEpisodeJournal:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
@@ -92,7 +204,11 @@ class PostgreSQLEpisodeJournal:
             with self._engine.connect() as connection:
                 tables = set(
                     connection.execute(
-                        select(func.to_regclass("public.episodes"), func.to_regclass("public.events"))
+                        select(
+                            func.to_regclass("public.episodes"),
+                            func.to_regclass("public.events"),
+                            func.to_regclass("public.delivery_outbox"),
+                        )
                     ).one()
                 )
                 if None in tables:
@@ -110,6 +226,14 @@ class PostgreSQLEpisodeJournal:
                         "journal_position", "event_type", "occurred_at", "payload",
                         "correlation_id", "causation_id", "schema_version",
                     },
+                    "delivery_outbox": {
+                        "outbox_id", "tenant_id", "episode_id",
+                        "delivery_request_event_id", "response_ready_event_id",
+                        "idempotency_key", "channel", "external_conversation_id",
+                        "outbound_sender_id", "outbound_recipient_id",
+                        "response_type", "language", "text", "status",
+                        "created_at", "schema_version",
+                    },
                 }
                 for table_name, expected in expected_columns.items():
                     actual = {column["name"] for column in inspector.get_columns(table_name)}
@@ -117,6 +241,30 @@ class PostgreSQLEpisodeJournal:
                         raise EpisodeJournalInfrastructureError(
                             "required episode journal schema is incompatible"
                         )
+                event_unique_names = {
+                    constraint["name"]
+                    for constraint in inspector.get_unique_constraints(
+                        "events"
+                    )
+                }
+                outbox_foreign_key_names = {
+                    constraint["name"]
+                    for constraint in inspector.get_foreign_keys(
+                        "delivery_outbox"
+                    )
+                }
+                if (
+                    "uq_events_event_episode_tenant"
+                    not in event_unique_names
+                    or not {
+                        "fk_delivery_outbox_episode_tenant",
+                        "fk_delivery_outbox_delivery_event_episode_tenant",
+                        "fk_delivery_outbox_ready_event_episode_tenant",
+                    }.issubset(outbox_foreign_key_names)
+                ):
+                    raise EpisodeJournalInfrastructureError(
+                        "required episode journal schema is incompatible"
+                    )
         except EpisodeJournalInfrastructureError:
             raise
         except SQLAlchemyError as exc:
@@ -129,6 +277,7 @@ class PostgreSQLEpisodeJournal:
             raise TypeError("episode must be a CognitiveEpisode")
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
+        _reject_delivery_requested_for_ordinary_append(event)
         if episode.tenant_id != event.tenant_id:
             raise ValueError("event tenant does not match episode tenant")
         if episode.event_ids != (event.event_id,):
@@ -150,6 +299,7 @@ class PostgreSQLEpisodeJournal:
     def append_event(self, tenant_id: str, episode_id: uuid.UUID, event: Event,
                      expected_event_ids: tuple[uuid.UUID, ...]) -> CognitiveEpisode:
         self._validate_append_inputs(tenant_id, episode_id, event, expected_event_ids)
+        _reject_delivery_requested_for_ordinary_append(event)
         if event.tenant_id != tenant_id:
             raise ValueError("event tenant does not match episode tenant")
         try:
@@ -183,6 +333,72 @@ class PostgreSQLEpisodeJournal:
             self._raise_integrity_error(exc, "event_id")
         except SQLAlchemyError as exc:
             raise EpisodeJournalInfrastructureError("failed to append event") from exc
+
+    def append_event_with_outbox(
+        self,
+        tenant_id: str,
+        episode_id: uuid.UUID,
+        event: Event,
+        expected_event_ids: tuple[uuid.UUID, ...],
+        outbox_entry: DeliveryOutboxEntry,
+    ) -> CognitiveEpisode:
+        self._validate_append_inputs(
+            tenant_id, episode_id, event, expected_event_ids
+        )
+        if not isinstance(outbox_entry, DeliveryOutboxEntry):
+            raise TypeError("outbox_entry must be a DeliveryOutboxEntry")
+        if event.tenant_id != tenant_id:
+            raise ValueError("event tenant does not match episode tenant")
+        try:
+            with Session(self._engine) as session, session.begin():
+                episode_row = session.execute(
+                    select(EpisodeRow).where(
+                        EpisodeRow.episode_id == episode_id,
+                        EpisodeRow.tenant_id == tenant_id,
+                    ).with_for_update()
+                ).scalar_one_or_none()
+                if episode_row is None:
+                    raise ValueError("episode not found")
+                event_rows = session.scalars(
+                    select(EventRow).where(
+                        EventRow.episode_id == episode_id,
+                        EventRow.tenant_id == tenant_id,
+                    ).order_by(EventRow.sequence)
+                ).all()
+                ids = tuple(row.event_id for row in event_rows)
+                if ids != expected_event_ids:
+                    raise EpisodeConcurrencyConflictError(
+                        "episode event_ids do not match expected_event_ids"
+                    )
+                if session.get(EventRow, event.event_id) is not None:
+                    raise ValueError("duplicate event_id")
+                preceding_events = tuple(
+                    self._event_from_row(row) for row in event_rows
+                )
+                _validate_delivery_append(
+                    tenant_id,
+                    episode_id,
+                    preceding_events,
+                    event,
+                    outbox_entry,
+                )
+                updated = self._episode_from_row(
+                    episode_row, ids
+                ).add_event(event)
+                session.add(self._event_row(event, episode_id, len(ids)))
+                # Satisfy the outbox FK without committing the transaction.
+                session.flush()
+                session.add(self._outbox_row(outbox_entry))
+                episode_row.updated_at = updated.updated_at
+            return updated
+        except (ValueError, EpisodeConcurrencyConflictError):
+            raise
+        except IntegrityError as exc:
+            self._raise_integrity_error(exc, "outbox identifier")
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError(
+                "failed to append event with outbox"
+            ) from exc
 
     def get_event(self, tenant_id: str, event_id: uuid.UUID) -> Event | None:
         self._validate_tenant_id(tenant_id)
@@ -241,6 +457,49 @@ class PostgreSQLEpisodeJournal:
         except SQLAlchemyError as exc:
             raise EpisodeJournalInfrastructureError("failed to list episodes") from exc
 
+    def get_outbox_entry(
+        self,
+        tenant_id: str,
+        outbox_id: uuid.UUID,
+    ) -> DeliveryOutboxEntry | None:
+        self._validate_tenant_id(tenant_id)
+        if not isinstance(outbox_id, uuid.UUID):
+            raise TypeError("outbox_id must be a uuid.UUID")
+        try:
+            with Session(self._engine) as session:
+                row = session.execute(
+                    select(DeliveryOutboxRow).where(
+                        DeliveryOutboxRow.outbox_id == outbox_id,
+                        DeliveryOutboxRow.tenant_id == tenant_id,
+                    )
+                ).scalar_one_or_none()
+                return None if row is None else self._outbox_from_row(row)
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError(
+                "failed to read outbox entry"
+            ) from exc
+
+    def list_outbox_entries(
+        self,
+        tenant_id: str,
+    ) -> tuple[DeliveryOutboxEntry, ...]:
+        self._validate_tenant_id(tenant_id)
+        try:
+            with Session(self._engine) as session:
+                rows = session.scalars(
+                    select(DeliveryOutboxRow).where(
+                        DeliveryOutboxRow.tenant_id == tenant_id
+                    ).order_by(
+                        DeliveryOutboxRow.created_at,
+                        DeliveryOutboxRow.outbox_id,
+                    )
+                ).all()
+                return tuple(self._outbox_from_row(row) for row in rows)
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError(
+                "failed to list outbox entries"
+            ) from exc
+
     def total_event_count(self) -> int:
         return self._count(EventRow)
 
@@ -279,6 +538,48 @@ class PostgreSQLEpisodeJournal:
             event_id=row.event_id, tenant_id=row.tenant_id, event_type=row.event_type,
             occurred_at=row.occurred_at, payload=row.payload,
             correlation_id=row.correlation_id, causation_id=row.causation_id,
+            schema_version=row.schema_version,
+        )
+
+    @staticmethod
+    def _outbox_row(entry: DeliveryOutboxEntry) -> DeliveryOutboxRow:
+        return DeliveryOutboxRow(
+            outbox_id=entry.outbox_id,
+            tenant_id=entry.tenant_id,
+            episode_id=entry.episode_id,
+            delivery_request_event_id=entry.delivery_request_event_id,
+            response_ready_event_id=entry.response_ready_event_id,
+            idempotency_key=entry.idempotency_key,
+            channel=entry.channel,
+            external_conversation_id=entry.external_conversation_id,
+            outbound_sender_id=entry.outbound_sender_id,
+            outbound_recipient_id=entry.outbound_recipient_id,
+            response_type=entry.response_type,
+            language=entry.language,
+            text=entry.text,
+            status=entry.status,
+            created_at=entry.created_at,
+            schema_version=entry.schema_version,
+        )
+
+    @staticmethod
+    def _outbox_from_row(row: DeliveryOutboxRow) -> DeliveryOutboxEntry:
+        return DeliveryOutboxEntry(
+            outbox_id=row.outbox_id,
+            tenant_id=row.tenant_id,
+            episode_id=row.episode_id,
+            delivery_request_event_id=row.delivery_request_event_id,
+            response_ready_event_id=row.response_ready_event_id,
+            idempotency_key=row.idempotency_key,
+            channel=row.channel,
+            external_conversation_id=row.external_conversation_id,
+            outbound_sender_id=row.outbound_sender_id,
+            outbound_recipient_id=row.outbound_recipient_id,
+            response_type=row.response_type,
+            language=row.language,
+            text=row.text,
+            status=row.status,
+            created_at=row.created_at,
             schema_version=row.schema_version,
         )
 

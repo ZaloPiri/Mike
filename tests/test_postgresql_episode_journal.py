@@ -87,9 +87,52 @@ def test_migration_downgrade_and_reupgrade(migrated_engine) -> None:
 
     config = Config("alembic.ini")
     command.downgrade(config, "base")
-    assert not set(inspect(migrated_engine).get_table_names()) & {"episodes", "events"}
+    assert not set(inspect(migrated_engine).get_table_names()) & {
+        "episodes", "events", "delivery_outbox"
+    }
     command.upgrade(config, "head")
-    assert {"episodes", "events"} <= set(inspect(migrated_engine).get_table_names())
+    assert {"episodes", "events", "delivery_outbox"} <= set(
+        inspect(migrated_engine).get_table_names()
+    )
+
+
+def test_delivery_outbox_schema_has_exact_approved_columns(migrated_engine) -> None:
+    from sqlalchemy import inspect
+
+    inspector = inspect(migrated_engine)
+    assert {column["name"] for column in inspector.get_columns("delivery_outbox")} == {
+        "outbox_id", "tenant_id", "episode_id", "delivery_request_event_id",
+        "response_ready_event_id", "idempotency_key", "channel",
+        "external_conversation_id", "outbound_sender_id",
+        "outbound_recipient_id", "response_type", "language", "text",
+        "status", "created_at", "schema_version",
+    }
+    event_uniques = {
+        constraint["name"]: tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("events")
+    }
+    assert event_uniques["uq_events_event_episode_tenant"] == (
+        "event_id", "episode_id", "tenant_id"
+    )
+    outbox_foreign_keys = {
+        constraint["name"]: (
+            tuple(constraint["constrained_columns"]),
+            tuple(constraint["referred_columns"]),
+        )
+        for constraint in inspector.get_foreign_keys("delivery_outbox")
+    }
+    assert outbox_foreign_keys[
+        "fk_delivery_outbox_delivery_event_episode_tenant"
+    ] == (
+        ("delivery_request_event_id", "episode_id", "tenant_id"),
+        ("event_id", "episode_id", "tenant_id"),
+    )
+    assert outbox_foreign_keys[
+        "fk_delivery_outbox_ready_event_episode_tenant"
+    ] == (
+        ("response_ready_event_id", "episode_id", "tenant_id"),
+        ("event_id", "episode_id", "tenant_id"),
+    )
 
 
 def test_shared_contract_against_postgresql(migrated_engine) -> None:
@@ -97,6 +140,10 @@ def test_shared_contract_against_postgresql(migrated_engine) -> None:
     from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
     from tests.episode_journal_contract import (
         assert_atomic_create_and_append,
+        assert_atomic_outbox_append,
+        assert_altered_trace_is_rejected,
+        assert_canonical_outbox_order,
+        assert_delivery_requested_requires_atomic_append,
         assert_exact_version_conflicts,
         assert_tenant_isolation_and_order,
     )
@@ -109,6 +156,10 @@ def test_shared_contract_against_postgresql(migrated_engine) -> None:
     assert_atomic_create_and_append(factory)
     assert_exact_version_conflicts(factory)
     assert_tenant_isolation_and_order(factory)
+    assert_atomic_outbox_append(factory)
+    assert_delivery_requested_requires_atomic_append(factory)
+    assert_canonical_outbox_order(factory)
+    assert_altered_trace_is_rejected(factory)
 
 
 def test_atomic_create_and_append_rows(journal, migrated_engine) -> None:
@@ -335,6 +386,208 @@ def test_different_episode_appends_can_both_commit(journal) -> None:
     assert all(len(result.event_ids) == 2 for result in results)
 
 
+def _outbox_values(journal, tenant_id: str):
+    from datetime import datetime, timezone
+    from mike_app.runtime.delivery_outbox import DeliveryOutboxEntry
+    from mike_app.runtime.event import Event
+    from tests.episode_journal_contract import build_ten_event_episode
+
+    episode, events = build_ten_event_episode(journal, tenant_id)
+    ready = events[-1]
+    delivery = Event.create(
+        tenant_id,
+        "communication.delivery_requested",
+        {
+            "source_event_id": str(events[0].event_id),
+            "response_ready_event_id": str(ready.event_id),
+            "channel": ready.payload["channel"],
+            "external_conversation_id": ready.payload["external_conversation_id"],
+            "outbound_sender_id": ready.payload["outbound_sender_id"],
+            "outbound_recipient_id": ready.payload["outbound_recipient_id"],
+            "idempotency_key": str(ready.event_id),
+            "request_method": "transactional_outbox",
+        },
+        correlation_id=ready.correlation_id,
+        causation_id=str(ready.event_id),
+    )
+    entry = DeliveryOutboxEntry(
+        outbox_id=uuid.uuid4(), tenant_id=tenant_id,
+        episode_id=episode.episode_id,
+        delivery_request_event_id=delivery.event_id,
+        response_ready_event_id=ready.event_id,
+        idempotency_key=str(ready.event_id),
+        channel=ready.payload["channel"],
+        external_conversation_id=ready.payload["external_conversation_id"],
+        outbound_sender_id=ready.payload["outbound_sender_id"],
+        outbound_recipient_id=ready.payload["outbound_recipient_id"],
+        response_type=ready.payload["response_type"],
+        language=ready.payload["language"], text=ready.payload["text"],
+        status="pending", created_at=datetime.now(timezone.utc), schema_version=1,
+    )
+    return episode, events, delivery, entry
+
+
+def test_outbox_database_failure_rolls_back_event_episode_and_outbox(
+    journal, migrated_engine, monkeypatch
+) -> None:
+    from sqlalchemy import event as sqlalchemy_event, text
+
+    episode, _, delivery, entry = _outbox_values(journal, "outbox-rollback")
+    before = journal.get_episode(entry.tenant_id, episode.episode_id)
+    original = journal._outbox_row
+
+    def invalid_row(value):
+        row = original(value)
+        row.status = "invalid"
+        return row
+
+    monkeypatch.setattr(journal, "_outbox_row", invalid_row)
+    observed_outbox_inserts = []
+
+    def verify_event_before_outbox(
+        connection, cursor, statement, parameters, context, executemany
+    ):
+        if statement.startswith("INSERT INTO delivery_outbox"):
+            assert connection.scalar(
+                text("SELECT count(*) FROM events WHERE event_id = :event_id"),
+                {"event_id": delivery.event_id},
+            ) == 1
+            observed_outbox_inserts.append(statement)
+
+    sqlalchemy_event.listen(
+        migrated_engine, "before_cursor_execute", verify_event_before_outbox
+    )
+    try:
+        with pytest.raises(ValueError, match="integrity constraint violated"):
+            journal.append_event_with_outbox(
+                entry.tenant_id, episode.episode_id, delivery,
+                episode.event_ids, entry,
+            )
+    finally:
+        sqlalchemy_event.remove(
+            migrated_engine, "before_cursor_execute", verify_event_before_outbox
+        )
+    assert len(observed_outbox_inserts) == 1
+    assert journal.get_event(entry.tenant_id, delivery.event_id) is None
+    assert journal.get_episode(entry.tenant_id, episode.episode_id) == before
+    assert journal.get_outbox_entry(entry.tenant_id, entry.outbox_id) is None
+    with migrated_engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM delivery_outbox")) == 0
+
+
+def test_outbox_foreign_key_failure_is_not_reported_as_duplicate(
+    journal, monkeypatch
+) -> None:
+    episode, _, delivery, entry = _outbox_values(journal, "outbox-fk")
+    original = journal._outbox_row
+
+    def invalid_row(value):
+        row = original(value)
+        row.response_ready_event_id = uuid.uuid4()
+        return row
+
+    monkeypatch.setattr(journal, "_outbox_row", invalid_row)
+    with pytest.raises(ValueError, match="integrity constraint violated") as error:
+        journal.append_event_with_outbox(
+            entry.tenant_id, episode.episode_id, delivery,
+            episode.event_ids, entry,
+        )
+    assert "duplicate" not in str(error.value)
+    assert journal.get_event(entry.tenant_id, delivery.event_id) is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "foreign_tenant"),
+    [
+        ("response_ready_event_id", "ownership-primary"),
+        ("response_ready_event_id", "ownership-foreign-tenant"),
+        ("delivery_request_event_id", "ownership-primary"),
+        ("delivery_request_event_id", "ownership-foreign-tenant"),
+    ],
+)
+def test_composite_event_foreign_keys_reject_existing_foreign_ownership(
+    journal, monkeypatch, field_name: str, foreign_tenant: str
+) -> None:
+    episode, _, delivery, entry = _outbox_values(
+        journal, "ownership-primary"
+    )
+    _, foreign_events, _, _ = _outbox_values(journal, foreign_tenant)
+    foreign_event_id = foreign_events[-1].event_id
+    original = journal._outbox_row
+
+    def invalid_row(value):
+        row = original(value)
+        setattr(row, field_name, foreign_event_id)
+        return row
+
+    monkeypatch.setattr(journal, "_outbox_row", invalid_row)
+    with pytest.raises(ValueError, match="integrity constraint violated"):
+        journal.append_event_with_outbox(
+            entry.tenant_id,
+            episode.episode_id,
+            delivery,
+            episode.event_ids,
+            entry,
+        )
+
+    assert journal.get_event(entry.tenant_id, delivery.event_id) is None
+    assert journal.get_outbox_entry(entry.tenant_id, entry.outbox_id) is None
+
+
+def test_concurrent_outbox_append_has_one_commit_and_no_orphans(
+    journal, migrated_engine
+) -> None:
+    from dataclasses import replace
+    from mike_app.runtime.episode_journal import EpisodeConcurrencyConflictError
+    from mike_app.runtime.event import Event
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+
+    episode, events, first_delivery, first_entry = _outbox_values(
+        journal, "outbox-concurrent"
+    )
+    second_delivery = Event.create(
+        first_delivery.tenant_id,
+        first_delivery.event_type,
+        first_delivery.to_dict()["payload"],
+        correlation_id=first_delivery.correlation_id,
+        causation_id=first_delivery.causation_id,
+    )
+    second_entry = replace(
+        first_entry,
+        outbox_id=uuid.uuid4(),
+        delivery_request_event_id=second_delivery.event_id,
+    )
+    candidates = (
+        (PostgreSQLEpisodeJournal(migrated_engine), first_delivery, first_entry),
+        (PostgreSQLEpisodeJournal(migrated_engine), second_delivery, second_entry),
+    )
+    barrier = threading.Barrier(2)
+
+    def append(candidate):
+        candidate_journal, event, entry = candidate
+        barrier.wait()
+        try:
+            candidate_journal.append_event_with_outbox(
+                entry.tenant_id, episode.episode_id, event,
+                episode.event_ids, entry,
+            )
+            return "committed"
+        except EpisodeConcurrencyConflictError:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(append, candidates))
+    assert sorted(outcomes) == ["committed", "conflict"]
+    stored_events = journal.list_events(first_entry.tenant_id)
+    stored_outbox = journal.list_outbox_entries(first_entry.tenant_id)
+    assert len(stored_events) == 11
+    assert tuple(event.event_id for event in stored_events[:10]) == tuple(
+        event.event_id for event in events
+    )
+    assert len(stored_outbox) == 1
+    assert stored_outbox[0].delivery_request_event_id == stored_events[-1].event_id
+
+
 def test_postgres_http_pipeline_and_pool_shutdown(migrated_engine, monkeypatch) -> None:
     from fastapi.testclient import TestClient
     from mike_app.core.settings import Settings
@@ -370,8 +623,8 @@ def test_postgres_http_pipeline_and_pool_shutdown(migrated_engine, monkeypatch) 
         assert response.status_code == 201
         assert response.json()["event_type"] == "message.received"
         events = application.state.episode_coordinator.list_events("http-postgres")
-        assert len(events) == 10
-        assert events[-1].event_type == "conversation.response_ready"
+        assert len(events) == 11
+        assert events[-1].event_type == "communication.delivery_requested"
         assert client.get("/health").json() == {"status": "ok", "service": "mike", "version": "0.1.0"}
         assert not hasattr(application.state, "database_engine")
         engine = created_engines[0]

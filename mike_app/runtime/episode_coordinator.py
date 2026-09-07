@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import uuid
 
+from mike_app.runtime.delivery_outbox import DeliveryOutboxEntry
 from mike_app.runtime.episode import CognitiveEpisode
-from mike_app.runtime.episode_journal import EpisodeJournal
+from mike_app.runtime.episode_journal import (
+    EpisodeJournal,
+    _reject_delivery_requested_for_ordinary_append,
+)
 from mike_app.runtime.event import Event
 
 
@@ -21,6 +25,7 @@ class EpisodeCoordinator:
     ) -> CognitiveEpisode:
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
+        _reject_delivery_requested_for_ordinary_append(event)
 
         episode = CognitiveEpisode.create(event, correlation_id=correlation_id)
         return self._episode_journal.create_episode_with_event(episode, event)
@@ -34,6 +39,7 @@ class EpisodeCoordinator:
             raise TypeError("episode_id must be a uuid.UUID")
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
+        _reject_delivery_requested_for_ordinary_append(event)
 
         episode = self._episode_journal.get_episode(
             event.tenant_id, episode_id
@@ -46,6 +52,27 @@ class EpisodeCoordinator:
             episode_id,
             event,
             episode.event_ids,
+        )
+
+    def append_to_episode_with_outbox(
+        self,
+        episode_id: uuid.UUID,
+        event: Event,
+        expected_event_ids: tuple[uuid.UUID, ...],
+        outbox_entry: DeliveryOutboxEntry,
+    ) -> CognitiveEpisode:
+        if not isinstance(episode_id, uuid.UUID):
+            raise TypeError("episode_id must be a uuid.UUID")
+        if not isinstance(event, Event):
+            raise TypeError("event must be an Event instance")
+        if not isinstance(outbox_entry, DeliveryOutboxEntry):
+            raise TypeError("outbox_entry must be a DeliveryOutboxEntry")
+        return self._episode_journal.append_event_with_outbox(
+            event.tenant_id,
+            episode_id,
+            event,
+            expected_event_ids,
+            outbox_entry,
         )
 
     def find_episode_for_event(
@@ -97,3 +124,16 @@ class EpisodeCoordinator:
         tenant_id: str,
     ) -> tuple[CognitiveEpisode, ...]:
         return self._episode_journal.list_episodes(tenant_id)
+
+    def get_outbox_entry(
+        self,
+        tenant_id: str,
+        outbox_id: uuid.UUID,
+    ) -> DeliveryOutboxEntry | None:
+        return self._episode_journal.get_outbox_entry(tenant_id, outbox_id)
+
+    def list_outbox_entries(
+        self,
+        tenant_id: str,
+    ) -> tuple[DeliveryOutboxEntry, ...]:
+        return self._episode_journal.list_outbox_entries(tenant_id)

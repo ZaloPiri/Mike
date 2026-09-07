@@ -57,8 +57,8 @@ def test_importing_postgresql_module_does_not_connect() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_metadata_contains_only_approved_journal_tables() -> None:
-    assert set(metadata.tables) == {"episodes", "events"}
+def test_metadata_contains_only_approved_journal_and_outbox_tables() -> None:
+    assert set(metadata.tables) == {"episodes", "events", "delivery_outbox"}
 
 
 def test_events_metadata_has_approved_types_and_constraints() -> None:
@@ -71,6 +71,14 @@ def test_events_metadata_has_approved_types_and_constraints() -> None:
         for constraint in events.constraints
         if constraint.__class__.__name__ == "UniqueConstraint"
     )
+    ownership = next(
+        constraint
+        for constraint in events.constraints
+        if isinstance(constraint, UniqueConstraint)
+        and tuple(constraint.columns.keys())
+        == ("event_id", "episode_id", "tenant_id")
+    )
+    assert ownership.name == "uq_events_event_episode_tenant"
     assert any(isinstance(constraint, ForeignKeyConstraint) for constraint in events.constraints)
     checks = {str(constraint.sqltext) for constraint in events.constraints if isinstance(constraint, CheckConstraint)}
     assert {"sequence >= 0", "schema_version > 0"} <= checks
@@ -84,6 +92,86 @@ def test_episodes_metadata_supports_tenant_safe_foreign_key() -> None:
         and tuple(constraint.columns.keys()) == ("episode_id", "tenant_id")
         for constraint in episodes.constraints
     )
+
+
+def test_delivery_outbox_metadata_matches_approved_schema() -> None:
+    outbox = metadata.tables["delivery_outbox"]
+    assert tuple(outbox.columns.keys()) == (
+        "outbox_id", "tenant_id", "episode_id", "delivery_request_event_id",
+        "response_ready_event_id", "idempotency_key", "channel",
+        "external_conversation_id", "outbound_sender_id",
+        "outbound_recipient_id", "response_type", "language", "text",
+        "status", "created_at", "schema_version",
+    )
+    assert outbox.c.outbox_id.primary_key is True
+    assert outbox.c.created_at.type.timezone is True
+    assert all(column.nullable is False for column in outbox.columns)
+    unique_columns = {
+        tuple(constraint.columns.keys())
+        for constraint in outbox.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert {
+        ("delivery_request_event_id",),
+        ("response_ready_event_id",),
+        ("idempotency_key",),
+    } <= unique_columns
+    foreign_columns = {
+        tuple(constraint.columns.keys())
+        for constraint in outbox.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+    }
+    assert {
+        ("episode_id", "tenant_id"),
+        ("delivery_request_event_id", "episode_id", "tenant_id"),
+        ("response_ready_event_id", "episode_id", "tenant_id"),
+    } <= foreign_columns
+    constraint_names = {
+        constraint.name for constraint in outbox.constraints
+    }
+    assert {
+        "fk_delivery_outbox_episode_tenant",
+        "fk_delivery_outbox_delivery_event_episode_tenant",
+        "fk_delivery_outbox_ready_event_episode_tenant",
+        "uq_delivery_outbox_delivery_request_event_id",
+        "uq_delivery_outbox_response_ready_event_id",
+        "uq_delivery_outbox_idempotency_key",
+    } <= constraint_names
+    checks = {
+        str(constraint.sqltext)
+        for constraint in outbox.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert {"status = 'pending'", "schema_version > 0"} <= checks
+    assert {
+        constraint.name
+        for constraint in outbox.constraints
+        if isinstance(constraint, CheckConstraint)
+    } == {
+        "ck_delivery_outbox_tenant_non_empty",
+        "ck_delivery_outbox_idempotency_key_non_empty",
+        "ck_delivery_outbox_channel_non_empty",
+        "ck_delivery_outbox_conversation_non_empty",
+        "ck_delivery_outbox_sender_non_empty",
+        "ck_delivery_outbox_recipient_non_empty",
+        "ck_delivery_outbox_response_type_non_empty",
+        "ck_delivery_outbox_language_non_empty",
+        "ck_delivery_outbox_text_non_empty",
+        "ck_delivery_outbox_status_pending",
+        "ck_delivery_outbox_schema_version_positive",
+    }
+
+
+def test_second_migration_follows_episode_journal_revision() -> None:
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    scripts = ScriptDirectory.from_config(Config("alembic.ini"))
+    head = scripts.get_current_head()
+    revision = scripts.get_revision(head)
+    assert head == "20260820_0002"
+    assert revision is not None
+    assert revision.down_revision == "20260812_0001"
 
 
 def test_alembic_is_not_called_by_application_import() -> None:

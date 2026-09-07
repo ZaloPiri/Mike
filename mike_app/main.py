@@ -11,6 +11,9 @@ from mike_app.api.health import router as health_router
 from mike_app.communication.target_resolution import (
     ConversationResponseTargetResolver,
 )
+from mike_app.communication.delivery_request import (
+    ConversationDeliveryRequestPlanner,
+)
 from mike_app.communication.readiness import (
     ConversationResponseReadinessEvaluator,
 )
@@ -41,6 +44,9 @@ from mike_app.handlers.conversation_response_target_resolved import (
 from mike_app.handlers.conversation_response_ready import (
     ConversationResponseReadyHandler,
 )
+from mike_app.handlers.conversation_delivery_requested import (
+    ConversationDeliveryRequestedHandler,
+)
 from mike_app.handlers.message_acceptance import MessageAcceptanceHandler
 from mike_app.handlers.message_perception import MessagePerceptionHandler
 from mike_app.handlers.perception_normalization import (
@@ -70,15 +76,30 @@ def _configure_app(app: FastAPI, episode_journal) -> None:
     runtime_handler_registry = RuntimeHandlerRegistry()
     runtime_dispatcher = RuntimeDispatcher(runtime_handler_registry)
 
+    conversation_delivery_request_planner = (
+        ConversationDeliveryRequestPlanner()
+    )
+    conversation_delivery_requested_handler = (
+        ConversationDeliveryRequestedHandler(
+            episode_coordinator,
+            conversation_delivery_request_planner,
+        )
+    )
+    runtime_handler_registry.register(
+        "conversation.response_ready",
+        conversation_delivery_requested_handler,
+    )
+
     deterministic_response_generator = DeterministicResponseGenerator()
     conversation_response_validator = ConversationResponseValidator()
     conversation_response_readiness_evaluator = (
     ConversationResponseReadinessEvaluator()
 )
     conversation_response_ready_handler = ConversationResponseReadyHandler(
-    episode_coordinator,
-    conversation_response_readiness_evaluator,
-)
+        episode_coordinator,
+        conversation_response_readiness_evaluator,
+        runtime_dispatcher,
+    )
     runtime_handler_registry.register(
     "communication.response_target_resolved",
     conversation_response_ready_handler,
@@ -237,6 +258,12 @@ def _configure_app(app: FastAPI, episode_journal) -> None:
     app.state.conversation_response_generated_handler = (
     conversation_response_generated_handler
 )
+    app.state.conversation_delivery_request_planner = (
+        conversation_delivery_request_planner
+    )
+    app.state.conversation_delivery_requested_handler = (
+        conversation_delivery_requested_handler
+    )
 
 
 
