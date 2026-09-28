@@ -55,8 +55,8 @@ def test_entry_rejects_empty_required_string(field_name: str) -> None:
         make_entry(**{field_name: " "})
 
 
-def test_entry_rejects_non_pending_status() -> None:
-    with pytest.raises(ValueError, match="pending"):
+def test_entry_rejects_processing_status_without_claim_pointer() -> None:
+    with pytest.raises(ValueError, match="complete claim fields"):
         make_entry(status="processing")
 
 

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import subprocess
 import sys
 
@@ -43,6 +43,13 @@ def test_postgres_accepts_explicit_database_url() -> None:
     )
 
 
+def test_run_once_enablement_is_development_only() -> None:
+    with pytest.raises(ValueError, match="only be enabled in development"):
+        validate_episode_journal_settings(
+            Settings("mike", "0.1.0", "production", None, None, "memory", None, None, True)
+        )
+
+
 def test_importing_postgresql_module_does_not_connect() -> None:
     environment = os.environ.copy()
     environment.pop("DATABASE_URL", None)
@@ -58,7 +65,7 @@ def test_importing_postgresql_module_does_not_connect() -> None:
 
 
 def test_metadata_contains_only_approved_journal_and_outbox_tables() -> None:
-    assert set(metadata.tables) == {"episodes", "events", "delivery_outbox"}
+    assert set(metadata.tables) == {"episodes", "events", "delivery_outbox", "delivery_receipts"}
 
 
 def test_events_metadata_has_approved_types_and_constraints() -> None:
@@ -101,11 +108,20 @@ def test_delivery_outbox_metadata_matches_approved_schema() -> None:
         "response_ready_event_id", "idempotency_key", "channel",
         "external_conversation_id", "outbound_sender_id",
         "outbound_recipient_id", "response_type", "language", "text",
-        "status", "created_at", "schema_version",
+        "status", "created_at", "schema_version", "adapter_attempt_count",
+        "next_attempt_at", "claim_token", "claimed_at", "lease_expires_at",
+        "last_error", "delivery_accepted_event_id",
     )
     assert outbox.c.outbox_id.primary_key is True
     assert outbox.c.created_at.type.timezone is True
-    assert all(column.nullable is False for column in outbox.columns)
+    assert all(
+        column.nullable is False
+        for column in outbox.columns
+        if column.name not in {
+            "next_attempt_at", "claim_token", "claimed_at",
+            "lease_expires_at", "last_error", "delivery_accepted_event_id",
+        }
+    )
     unique_columns = {
         tuple(constraint.columns.keys())
         for constraint in outbox.constraints
@@ -133,6 +149,7 @@ def test_delivery_outbox_metadata_matches_approved_schema() -> None:
         "fk_delivery_outbox_episode_tenant",
         "fk_delivery_outbox_delivery_event_episode_tenant",
         "fk_delivery_outbox_ready_event_episode_tenant",
+        "fk_delivery_outbox_accepted_event_episode_tenant",
         "uq_delivery_outbox_delivery_request_event_id",
         "uq_delivery_outbox_response_ready_event_id",
         "uq_delivery_outbox_idempotency_key",
@@ -142,7 +159,7 @@ def test_delivery_outbox_metadata_matches_approved_schema() -> None:
         for constraint in outbox.constraints
         if isinstance(constraint, CheckConstraint)
     }
-    assert {"status = 'pending'", "schema_version > 0"} <= checks
+    assert {"status in ('pending', 'processing', 'completed', 'failed')", "schema_version > 0"} <= checks
     assert {
         constraint.name
         for constraint in outbox.constraints
@@ -157,7 +174,8 @@ def test_delivery_outbox_metadata_matches_approved_schema() -> None:
         "ck_delivery_outbox_response_type_non_empty",
         "ck_delivery_outbox_language_non_empty",
         "ck_delivery_outbox_text_non_empty",
-        "ck_delivery_outbox_status_pending",
+        "ck_delivery_outbox_status_valid",
+        "ck_delivery_outbox_acceptance_pointer",
         "ck_delivery_outbox_schema_version_positive",
     }
 
@@ -169,9 +187,9 @@ def test_second_migration_follows_episode_journal_revision() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
     head = scripts.get_current_head()
     revision = scripts.get_revision(head)
-    assert head == "20260820_0002"
+    assert head == "20260927_0003"
     assert revision is not None
-    assert revision.down_revision == "20260812_0001"
+    assert revision.down_revision == "20260820_0002"
 
 
 def test_alembic_is_not_called_by_application_import() -> None:

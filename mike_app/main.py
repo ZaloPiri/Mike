@@ -63,6 +63,8 @@ from mike_app.runtime.episode_journal import (
     InMemoryEpisodeJournal,
 )
 from mike_app.runtime.handler_registry import RuntimeHandlerRegistry
+from mike_app.runtime.delivery_processing import DeliveryProcessor
+from mike_app.runtime.development_adapter import DevelopmentAdapter
 from mike_app.runtime.postgresql_episode_journal import (
     EpisodeJournalInfrastructureError,
     PostgreSQLEpisodeJournal,
@@ -263,6 +265,9 @@ def _configure_app(app: FastAPI, episode_journal) -> None:
     )
     app.state.conversation_delivery_requested_handler = (
         conversation_delivery_requested_handler
+    )
+    app.state.delivery_processor = DeliveryProcessor(
+        episode_journal, DevelopmentAdapter()
     )
 
 

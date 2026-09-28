@@ -17,6 +17,7 @@ from sqlalchemy import (
     func,
     inspect,
     select,
+    Index,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.engine import Engine
@@ -28,9 +29,11 @@ from mike_app.runtime.delivery_outbox import DeliveryOutboxEntry
 from mike_app.runtime.episode_journal import (
     EpisodeConcurrencyConflictError,
     _reject_delivery_requested_for_ordinary_append,
+    _reject_delivery_accepted_for_ordinary_append,
     _validate_delivery_append,
 )
 from mike_app.runtime.event import Event
+from mike_app.runtime.delivery_receipt import DeliveryReceipt, ReceiptConflictError, snapshot_hash
 
 
 class EpisodeJournalInfrastructureError(RuntimeError):
@@ -98,6 +101,7 @@ class EventRow(Base):
 class DeliveryOutboxRow(Base):
     __tablename__ = "delivery_outbox"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "outbox_id", name="uq_delivery_outbox_id_tenant"),
         ForeignKeyConstraint(
             ["episode_id", "tenant_id"],
             ["episodes.episode_id", "episodes.tenant_id"],
@@ -112,6 +116,11 @@ class DeliveryOutboxRow(Base):
             ["response_ready_event_id", "episode_id", "tenant_id"],
             ["events.event_id", "events.episode_id", "events.tenant_id"],
             name="fk_delivery_outbox_ready_event_episode_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["delivery_accepted_event_id", "episode_id", "tenant_id"],
+            ["events.event_id", "events.episode_id", "events.tenant_id"],
+            name="fk_delivery_outbox_accepted_event_episode_tenant",
         ),
         UniqueConstraint(
             "delivery_request_event_id",
@@ -162,8 +171,12 @@ class DeliveryOutboxRow(Base):
             name="ck_delivery_outbox_text_non_empty",
         ),
         CheckConstraint(
-            "status = 'pending'",
-            name="ck_delivery_outbox_status_pending",
+            "status in ('pending', 'processing', 'completed', 'failed')",
+            name="ck_delivery_outbox_status_valid",
+        ),
+        CheckConstraint(
+            "(status = 'completed' and delivery_accepted_event_id is not null) or (status <> 'completed' and delivery_accepted_event_id is null)",
+            name="ck_delivery_outbox_acceptance_pointer",
         ),
         CheckConstraint(
             "schema_version > 0",
@@ -193,6 +206,32 @@ class DeliveryOutboxRow(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    adapter_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claimed_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_accepted_event_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class DeliveryReceiptRow(Base):
+    __tablename__ = "delivery_receipts"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_delivery_receipts_idempotency_key"),
+        ForeignKeyConstraint(["tenant_id", "outbox_id"], ["delivery_outbox.tenant_id", "delivery_outbox.outbox_id"], name="fk_delivery_receipts_outbox"),
+        CheckConstraint("length(btrim(tenant_id)) > 0", name="ck_delivery_receipts_tenant_non_empty"),
+        CheckConstraint("schema_version > 0", name="ck_delivery_receipts_schema_version_positive"),
+    )
+    receipt_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    outbox_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    delivery_request_event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    adapter: Mapped[str] = mapped_column(Text, nullable=False)
+    accepted_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class PostgreSQLEpisodeJournal:
@@ -208,6 +247,7 @@ class PostgreSQLEpisodeJournal:
                             func.to_regclass("public.episodes"),
                             func.to_regclass("public.events"),
                             func.to_regclass("public.delivery_outbox"),
+                            func.to_regclass("public.delivery_receipts"),
                         )
                     ).one()
                 )
@@ -232,7 +272,13 @@ class PostgreSQLEpisodeJournal:
                         "idempotency_key", "channel", "external_conversation_id",
                         "outbound_sender_id", "outbound_recipient_id",
                         "response_type", "language", "text", "status",
-                        "created_at", "schema_version",
+                        "created_at", "schema_version", "adapter_attempt_count",
+                        "next_attempt_at", "claim_token", "claimed_at",
+                        "lease_expires_at", "last_error", "delivery_accepted_event_id",
+                    },
+                    "delivery_receipts": {
+                        "receipt_id", "tenant_id", "outbox_id", "delivery_request_event_id",
+                        "idempotency_key", "snapshot_hash", "adapter", "accepted_at", "schema_version",
                     },
                 }
                 for table_name, expected in expected_columns.items():
@@ -253,6 +299,23 @@ class PostgreSQLEpisodeJournal:
                         "delivery_outbox"
                     )
                 }
+                outbox_unique_names = {
+                    constraint["name"] for constraint in inspector.get_unique_constraints("delivery_outbox")
+                }
+                outbox_check_names = {
+                    constraint["name"] for constraint in inspector.get_check_constraints("delivery_outbox")
+                }
+                receipt_unique_names = {
+                    constraint["name"] for constraint in inspector.get_unique_constraints("delivery_receipts")
+                }
+                receipt_foreign_key_names = {
+                    constraint["name"] for constraint in inspector.get_foreign_keys("delivery_receipts")
+                }
+                checks_by_name = {
+                    constraint["name"]: " ".join(constraint["sqltext"].split()).lower()
+                    for table_name in ("delivery_outbox", "delivery_receipts")
+                    for constraint in inspector.get_check_constraints(table_name)
+                }
                 if (
                     "uq_events_event_episode_tenant"
                     not in event_unique_names
@@ -260,7 +323,15 @@ class PostgreSQLEpisodeJournal:
                         "fk_delivery_outbox_episode_tenant",
                         "fk_delivery_outbox_delivery_event_episode_tenant",
                         "fk_delivery_outbox_ready_event_episode_tenant",
+                        "fk_delivery_outbox_accepted_event_episode_tenant",
                     }.issubset(outbox_foreign_key_names)
+                    or not {"uq_delivery_outbox_accepted_event", "uq_delivery_outbox_id_tenant"}.issubset(outbox_unique_names)
+                    or not {"ck_delivery_outbox_status_valid", "ck_delivery_outbox_acceptance_pointer"}.issubset(outbox_check_names)
+                    or "uq_delivery_receipts_idempotency_key" not in receipt_unique_names
+                    or "fk_delivery_receipts_outbox" not in receipt_foreign_key_names
+                    or not all(value in checks_by_name.get("ck_delivery_outbox_status_valid", "") for value in ("status", "pending", "processing", "completed", "failed"))
+                    or not all(value in checks_by_name.get("ck_delivery_outbox_acceptance_pointer", "") for value in ("status", "completed", "delivery_accepted_event_id", "is not null", "is null"))
+                    or "schema_version > 0" not in checks_by_name.get("ck_delivery_receipts_schema_version_positive", "")
                 ):
                     raise EpisodeJournalInfrastructureError(
                         "required episode journal schema is incompatible"
@@ -278,6 +349,7 @@ class PostgreSQLEpisodeJournal:
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
         _reject_delivery_requested_for_ordinary_append(event)
+        _reject_delivery_accepted_for_ordinary_append(event)
         if episode.tenant_id != event.tenant_id:
             raise ValueError("event tenant does not match episode tenant")
         if episode.event_ids != (event.event_id,):
@@ -300,6 +372,7 @@ class PostgreSQLEpisodeJournal:
                      expected_event_ids: tuple[uuid.UUID, ...]) -> CognitiveEpisode:
         self._validate_append_inputs(tenant_id, episode_id, event, expected_event_ids)
         _reject_delivery_requested_for_ordinary_append(event)
+        _reject_delivery_accepted_for_ordinary_append(event)
         if event.tenant_id != tenant_id:
             raise ValueError("event tenant does not match episode tenant")
         try:
@@ -500,6 +573,142 @@ class PostgreSQLEpisodeJournal:
                 "failed to list outbox entries"
             ) from exc
 
+    def claim_one_delivery(self, tenant_id: str, now, lease_seconds: int) -> DeliveryOutboxEntry | None:
+        from datetime import timedelta
+        self._validate_tenant_id(tenant_id)
+        try:
+            with Session(self._engine) as session, session.begin():
+                database_now = session.scalar(select(func.clock_timestamp()))
+                query = select(DeliveryOutboxRow).where(
+                    DeliveryOutboxRow.tenant_id == tenant_id,
+                    ((DeliveryOutboxRow.status == "pending") & ((DeliveryOutboxRow.next_attempt_at.is_(None)) | (DeliveryOutboxRow.next_attempt_at <= func.clock_timestamp())))
+                    | ((DeliveryOutboxRow.status == "processing") & (DeliveryOutboxRow.lease_expires_at <= func.clock_timestamp())),
+                ).order_by(DeliveryOutboxRow.created_at, DeliveryOutboxRow.outbox_id).with_for_update(skip_locked=True).limit(1)
+                row = session.scalars(query).first()
+                if row is None:
+                    return None
+                database_now = session.scalar(select(func.clock_timestamp()))
+                if row.status == "pending" and row.next_attempt_at is not None and row.next_attempt_at > database_now:
+                    return None
+                if row.status == "processing" and (row.lease_expires_at is None or row.lease_expires_at > database_now):
+                    return None
+                row.status = "processing"
+                row.claim_token = uuid.uuid4()
+                row.claimed_at = database_now
+                row.lease_expires_at = database_now + timedelta(seconds=lease_seconds)
+                session.flush()
+                return self._outbox_from_row(row)
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError("failed to claim delivery") from exc
+
+    def get_delivery_receipt(self, tenant_id: str, idempotency_key: str) -> DeliveryReceipt | None:
+        self._validate_tenant_id(tenant_id)
+        try:
+            with Session(self._engine) as session:
+                row = session.scalars(select(DeliveryReceiptRow).where(DeliveryReceiptRow.tenant_id == tenant_id, DeliveryReceiptRow.idempotency_key == idempotency_key)).first()
+                return None if row is None else self._receipt_from_row(row)
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError("failed to read delivery receipt") from exc
+
+    def save_delivery_receipt(self, receipt: DeliveryReceipt, claim_token: uuid.UUID) -> DeliveryReceipt:
+        try:
+            with Session(self._engine) as session, session.begin():
+                outbox = session.scalars(select(DeliveryOutboxRow).where(DeliveryOutboxRow.outbox_id == receipt.outbox_id, DeliveryOutboxRow.tenant_id == receipt.tenant_id).with_for_update()).one_or_none()
+                database_now = session.scalar(select(func.clock_timestamp()))
+                if outbox is None or outbox.status != "processing" or outbox.claim_token != claim_token or outbox.lease_expires_at is None or outbox.lease_expires_at <= database_now or receipt.snapshot_hash != snapshot_hash(self._outbox_from_row(outbox)):
+                    raise ValueError("stale or invalid delivery claim")
+                existing = session.scalars(select(DeliveryReceiptRow).where(DeliveryReceiptRow.idempotency_key == receipt.idempotency_key)).first()
+                if existing is not None:
+                    value = self._receipt_from_row(existing)
+                    if value != receipt:
+                        raise ReceiptConflictError("receipt idempotency conflict")
+                    return value
+                session.add(DeliveryReceiptRow(receipt_id=receipt.receipt_id, tenant_id=receipt.tenant_id, outbox_id=receipt.outbox_id, delivery_request_event_id=receipt.delivery_request_event_id, idempotency_key=receipt.idempotency_key, snapshot_hash=receipt.snapshot_hash, adapter=receipt.adapter, accepted_at=receipt.accepted_at, schema_version=receipt.schema_version))
+                return receipt
+        except ReceiptConflictError:
+            raise
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError("failed to save delivery receipt") from exc
+
+    def start_adapter_attempt(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, now) -> DeliveryOutboxEntry:
+        try:
+            with Session(self._engine) as session, session.begin():
+                row = session.scalars(select(DeliveryOutboxRow).where(DeliveryOutboxRow.outbox_id == outbox_id, DeliveryOutboxRow.tenant_id == tenant_id).with_for_update()).one_or_none()
+                database_now = session.scalar(select(func.clock_timestamp()))
+                if row is None or row.status != "processing" or row.claim_token != claim_token or row.lease_expires_at is None or row.lease_expires_at <= database_now or row.adapter_attempt_count >= 3:
+                    raise ValueError("stale or invalid delivery claim")
+                row.adapter_attempt_count += 1
+                session.flush()
+                return self._outbox_from_row(row)
+        except ValueError:
+            raise
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError("failed to start adapter attempt") from exc
+
+    def fail_delivery(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, now, error: str, retry_at) -> DeliveryOutboxEntry:
+        from datetime import timedelta
+        if not isinstance(error, str) or not error or len(error) > 512:
+            raise ValueError("error must be a bounded non-empty string")
+        try:
+            with Session(self._engine) as session, session.begin():
+                row = session.scalars(select(DeliveryOutboxRow).where(DeliveryOutboxRow.outbox_id == outbox_id, DeliveryOutboxRow.tenant_id == tenant_id).with_for_update()).one_or_none()
+                database_now = session.scalar(select(func.clock_timestamp()))
+                if row is None or row.status != "processing" or row.claim_token != claim_token or row.lease_expires_at is None or row.lease_expires_at <= database_now:
+                    raise ValueError("stale or invalid delivery claim")
+                if session.scalars(select(DeliveryReceiptRow).where(DeliveryReceiptRow.tenant_id == tenant_id, DeliveryReceiptRow.idempotency_key == row.idempotency_key)).first() is not None:
+                    raise ValueError("successful receipt already exists")
+                row.status = "pending" if retry_at is not None and row.adapter_attempt_count < 3 else "failed"
+                row.next_attempt_at = database_now + timedelta(seconds=30 if row.adapter_attempt_count == 1 else 120) if retry_at is not None and row.adapter_attempt_count < 3 else None
+                row.last_error = error
+                row.claim_token = None
+                row.claimed_at = None
+                row.lease_expires_at = None
+                session.flush()
+                return self._outbox_from_row(row)
+        except ValueError:
+            raise
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError("failed to record delivery failure") from exc
+
+    def finalize_delivery(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, receipt: DeliveryReceipt) -> DeliveryOutboxEntry:
+        try:
+            with Session(self._engine) as session, session.begin():
+                row = session.scalars(select(DeliveryOutboxRow).where(DeliveryOutboxRow.outbox_id == outbox_id, DeliveryOutboxRow.tenant_id == tenant_id).with_for_update()).one_or_none()
+                database_now = session.scalar(select(func.clock_timestamp()))
+                if row is None:
+                    raise ValueError("outbox not found")
+                if row.status == "completed":
+                    return self._outbox_from_row(row)
+                if row.status != "processing" or row.claim_token != claim_token or row.lease_expires_at is None or row.lease_expires_at <= database_now:
+                    raise ValueError("stale or invalid delivery claim")
+                stored = session.scalars(select(DeliveryReceiptRow).where(DeliveryReceiptRow.tenant_id == tenant_id, DeliveryReceiptRow.idempotency_key == receipt.idempotency_key)).one_or_none()
+                if stored is None or self._receipt_from_row(stored) != receipt or not receipt.is_compatible(self._outbox_from_row(row)):
+                    raise ValueError("receipt is not compatible with outbox")
+                events = session.scalars(select(EventRow).where(EventRow.episode_id == row.episode_id, EventRow.tenant_id == tenant_id).order_by(EventRow.sequence)).all()
+                if len(events) != 11 or events[-1].event_id != row.delivery_request_event_id:
+                    raise ValueError("delivery request is not terminal in episode")
+                request_event = events[-1]
+                preceding = tuple(self._event_from_row(value) for value in events[:-1])
+                _validate_delivery_append(tenant_id, row.episode_id, preceding, self._event_from_row(events[-1]), self._outbox_from_row(row))
+                event = Event.create(tenant_id, "communication.delivery_accepted", {"schema_version": 1, "delivery_request_event_id": str(row.delivery_request_event_id), "response_ready_event_id": str(row.response_ready_event_id), "outbox_id": str(row.outbox_id), "receipt_id": str(receipt.receipt_id), "acceptance_method": "development_adapter", "adapter": "development"}, correlation_id=request_event.correlation_id, causation_id=str(row.delivery_request_event_id))
+                episode_row = session.scalars(select(EpisodeRow).where(EpisodeRow.episode_id == row.episode_id, EpisodeRow.tenant_id == tenant_id).with_for_update()).one()
+                session.add(self._event_row(event, row.episode_id, len(events)))
+                # Materialize event 12 before setting the acceptance pointer;
+                # PostgreSQL checks the composite FK at statement flush time.
+                session.flush()
+                row.delivery_accepted_event_id = event.event_id
+                row.status = "completed"
+                row.claim_token = None
+                row.claimed_at = None
+                row.lease_expires_at = None
+                episode_row.updated_at = event.occurred_at
+                session.flush()
+                return self._outbox_from_row(row)
+        except ValueError:
+            raise
+        except SQLAlchemyError as exc:
+            raise EpisodeJournalInfrastructureError("failed to finalize delivery") from exc
+
     def total_event_count(self) -> int:
         return self._count(EventRow)
 
@@ -560,6 +769,13 @@ class PostgreSQLEpisodeJournal:
             status=entry.status,
             created_at=entry.created_at,
             schema_version=entry.schema_version,
+            adapter_attempt_count=entry.adapter_attempt_count,
+            next_attempt_at=entry.next_attempt_at,
+            claim_token=entry.claim_token,
+            claimed_at=entry.claimed_at,
+            lease_expires_at=entry.lease_expires_at,
+            last_error=entry.last_error,
+            delivery_accepted_event_id=entry.delivery_accepted_event_id,
         )
 
     @staticmethod
@@ -580,6 +796,27 @@ class PostgreSQLEpisodeJournal:
             text=row.text,
             status=row.status,
             created_at=row.created_at,
+            schema_version=row.schema_version,
+            adapter_attempt_count=row.adapter_attempt_count,
+            next_attempt_at=row.next_attempt_at,
+            claim_token=row.claim_token,
+            claimed_at=row.claimed_at,
+            lease_expires_at=row.lease_expires_at,
+            last_error=row.last_error,
+            delivery_accepted_event_id=row.delivery_accepted_event_id,
+        )
+
+    @staticmethod
+    def _receipt_from_row(row: DeliveryReceiptRow) -> DeliveryReceipt:
+        return DeliveryReceipt(
+            receipt_id=row.receipt_id,
+            tenant_id=row.tenant_id,
+            outbox_id=row.outbox_id,
+            delivery_request_event_id=row.delivery_request_event_id,
+            idempotency_key=row.idempotency_key,
+            snapshot_hash=row.snapshot_hash,
+            adapter=row.adapter,
+            accepted_at=row.accepted_at,
             schema_version=row.schema_version,
         )
 

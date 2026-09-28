@@ -10,6 +10,7 @@ from pydantic import AfterValidator, BaseModel
 from mike_app.runtime.episode import CognitiveEpisode
 from mike_app.runtime.event import Event
 from mike_app.runtime.episode_coordinator import EpisodeCoordinator
+from mike_app.runtime.delivery_processing import DeliveryProcessor, RunOnceResult
 
 
 def _validate_tenant_id(value: str) -> str:
@@ -56,7 +57,30 @@ class DevEpisodeDetailResponse(BaseModel):
     events: list[DevEventResponse]
 
 
+class DevDeliveryRunOnceResponse(BaseModel):
+    outcome: str
+    tenant_id: str
+    outbox_id: uuid.UUID | None
+    status: str | None
+    error: str | None
+
+
 router = APIRouter()
+
+
+@router.post("/dev/tenants/{tenant_id}/delivery/run-once", response_model=DevDeliveryRunOnceResponse)
+def run_delivery_once(tenant_id: TenantId, request: Request) -> DevDeliveryRunOnceResponse:
+    if not request.app.state.settings.delivery_run_once_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery processing is disabled")
+    processor: DeliveryProcessor = request.app.state.delivery_processor
+    result: RunOnceResult = processor.run_once(tenant_id)
+    return DevDeliveryRunOnceResponse(
+        outcome=result.outcome,
+        tenant_id=result.tenant_id,
+        outbox_id=result.outbox_id,
+        status=result.status,
+        error=result.error,
+    )
 
 
 def _event_response(event: Event) -> DevEventResponse:

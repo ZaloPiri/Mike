@@ -3,6 +3,7 @@ from tests.episode_journal_contract import (
     assert_atomic_create_and_append,
     assert_atomic_outbox_append,
     assert_altered_trace_is_rejected,
+    assert_processing_contract,
     assert_canonical_outbox_order,
     assert_delivery_requested_requires_atomic_append,
     assert_exact_version_conflicts,
@@ -36,3 +37,7 @@ def test_in_memory_uses_canonical_outbox_order() -> None:
 
 def test_in_memory_rejects_altered_trace_envelopes() -> None:
     assert_altered_trace_is_rejected(InMemoryEpisodeJournal)
+
+
+def test_in_memory_processing_contract() -> None:
+    assert_processing_contract(InMemoryEpisodeJournal)

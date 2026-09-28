@@ -34,7 +34,7 @@ def _validated_url() -> str:
 def migrated_engine():
     from alembic import command
     from alembic.config import Config
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, text
 
     url = _validated_url()
     previous = os.environ.get("DATABASE_URL")
@@ -46,6 +46,8 @@ def migrated_engine():
     try:
         yield engine
     finally:
+        with engine.begin() as connection:
+            connection.execute(text("TRUNCATE TABLE events, episodes RESTART IDENTITY CASCADE"))
         engine.dispose()
         command.downgrade(config, "base")
         if previous is None:
@@ -96,6 +98,209 @@ def test_migration_downgrade_and_reupgrade(migrated_engine) -> None:
     )
 
 
+def test_phase24_upgrade_preserves_phase23_rows_and_initializes_history(migrated_engine) -> None:
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import text
+    from tests.test_delivery_processing import make_delivery
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+
+    journal = PostgreSQLEpisodeJournal(migrated_engine)
+    entry = make_delivery(journal, "migration-existing-phase23")
+    with migrated_engine.connect() as connection:
+        before = connection.execute(text("SELECT event_id, tenant_id, episode_id, sequence, event_type, payload FROM events ORDER BY sequence")).all()
+        before_outbox = connection.execute(text("SELECT outbox_id, tenant_id, episode_id, delivery_request_event_id, response_ready_event_id, idempotency_key, status, text FROM delivery_outbox")).one()
+    config = Config("alembic.ini")
+    command.downgrade(config, "20260820_0002")
+    with migrated_engine.connect() as connection:
+        assert connection.execute(text("SELECT event_id, tenant_id, episode_id, sequence, event_type, payload FROM events ORDER BY sequence")).all() == before
+        assert connection.execute(text("SELECT outbox_id, tenant_id, episode_id, delivery_request_event_id, response_ready_event_id, idempotency_key, status, text FROM delivery_outbox")).one() == before_outbox
+    command.upgrade(config, "head")
+    with migrated_engine.connect() as connection:
+        initialized = connection.execute(text("SELECT status, adapter_attempt_count, next_attempt_at, claim_token, claimed_at, lease_expires_at, last_error, delivery_accepted_event_id FROM delivery_outbox WHERE outbox_id = :id"), {"id": entry.outbox_id}).one()
+        assert initialized == ("pending", 0, None, None, None, None, None, None)
+
+
+def test_phase24_verify_schema_checks_definitions_not_only_names(migrated_engine) -> None:
+    from sqlalchemy import text
+    from mike_app.runtime.postgresql_episode_journal import EpisodeJournalInfrastructureError, PostgreSQLEpisodeJournal
+
+    journal = PostgreSQLEpisodeJournal(migrated_engine)
+    journal.verify_schema()
+    with migrated_engine.begin() as connection:
+        connection.execute(text("ALTER TABLE delivery_outbox DROP CONSTRAINT ck_delivery_outbox_status_valid"))
+        connection.execute(text("ALTER TABLE delivery_outbox ADD CONSTRAINT ck_delivery_outbox_status_valid CHECK (status = 'pending')"))
+    try:
+        with pytest.raises(EpisodeJournalInfrastructureError, match="incompatible"):
+            journal.verify_schema()
+    finally:
+        with migrated_engine.begin() as connection:
+            connection.execute(text("ALTER TABLE delivery_outbox DROP CONSTRAINT ck_delivery_outbox_status_valid"))
+            connection.execute(text("ALTER TABLE delivery_outbox ADD CONSTRAINT ck_delivery_outbox_status_valid CHECK (status in ('pending', 'processing', 'completed', 'failed'))"))
+
+
+def test_phase24_downgrade_rejects_history_without_mutating_schema_or_data(migrated_engine) -> None:
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import text
+    from tests.test_delivery_processing import make_delivery
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+
+    entry = make_delivery(PostgreSQLEpisodeJournal(migrated_engine), "downgrade-history")
+    with migrated_engine.begin() as connection:
+        connection.execute(text("UPDATE delivery_outbox SET status = 'failed', adapter_attempt_count = 1, last_error = 'test' WHERE outbox_id = :id"), {"id": entry.outbox_id})
+        before = connection.execute(text("SELECT status, adapter_attempt_count, last_error FROM delivery_outbox WHERE outbox_id = :id"), {"id": entry.outbox_id}).one()
+    with pytest.raises(RuntimeError, match="processing history"):
+        command.downgrade(Config("alembic.ini"), "20260820_0002")
+    with migrated_engine.connect() as connection:
+        assert connection.execute(text("SELECT status, adapter_attempt_count, last_error FROM delivery_outbox WHERE outbox_id = :id"), {"id": entry.outbox_id}).one() == before
+        assert connection.execute(text("SELECT to_regclass('public.delivery_receipts')")).scalar_one() == "delivery_receipts"
+    with migrated_engine.begin() as connection:
+        connection.execute(text("UPDATE delivery_outbox SET status = 'pending', adapter_attempt_count = 0, last_error = NULL WHERE outbox_id = :id"), {"id": entry.outbox_id})
+
+
+def _run_real_phase24_downgrade(connection) -> None:
+    import importlib.util
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    spec = importlib.util.spec_from_file_location(
+        "phase24_migration_under_test",
+        "alembic/versions/20260927_0003_delivery_processing.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    context = MigrationContext.configure(connection)
+    with Operations.context(Operations(context)):
+        module.downgrade()
+
+
+def test_phase24_downgrade_writer_commits_before_migration_lock_and_is_detected(
+    migrated_engine,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import text
+    import threading
+    from tests.test_delivery_processing import make_delivery
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+
+    entry = make_delivery(PostgreSQLEpisodeJournal(migrated_engine), "downgrade-writer-before-lock")
+    writer = migrated_engine.connect()
+    writer_transaction = writer.begin()
+    downgrade_started = threading.Event()
+    downgrade_finished = threading.Event()
+    try:
+        writer.execute(text("SELECT outbox_id FROM delivery_outbox WHERE outbox_id = :id FOR UPDATE"), {"id": entry.outbox_id})
+        writer.execute(text("UPDATE delivery_outbox SET status = 'failed', adapter_attempt_count = 1, last_error = 'committed history' WHERE outbox_id = :id"), {"id": entry.outbox_id})
+
+        def downgrade():
+            downgrade_started.set()
+            os.environ["DATABASE_URL"] = os.environ["MIKE_TEST_DATABASE_URL"]
+            try:
+                with pytest.raises(RuntimeError, match="processing history"):
+                    command.downgrade(Config("alembic.ini"), "20260820_0002")
+            finally:
+                downgrade_finished.set()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(downgrade)
+            assert downgrade_started.wait(2)
+            import time
+            time.sleep(0.2)
+            assert not downgrade_finished.is_set()
+            writer_transaction.commit()
+            future.result(timeout=5)
+    finally:
+        if writer_transaction.is_active:
+            writer_transaction.rollback()
+        writer.close()
+
+    with migrated_engine.connect() as connection:
+        assert connection.execute(text("SELECT status, adapter_attempt_count, last_error FROM delivery_outbox WHERE outbox_id = :id"), {"id": entry.outbox_id}).one() == ("failed", 1, "committed history")
+        assert connection.execute(text("SELECT to_regclass('public.delivery_receipts')")).scalar_one() == "delivery_receipts"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260927_0003"
+
+
+def test_phase24_downgrade_excludes_writer_after_lock_and_leaves_phase23_schema(
+    migrated_engine,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.engine import Engine
+    from sqlalchemy import event, text
+    import threading
+    from tests.test_delivery_processing import make_delivery
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+    from mike_app.runtime.postgresql_episode_journal import PostgreSQLEpisodeJournal
+
+    entry = make_delivery(PostgreSQLEpisodeJournal(migrated_engine), "downgrade-writer-during-lock")
+    downgrade_connection = migrated_engine.connect()
+    writer = migrated_engine.connect()
+    lock_acquired = threading.Event()
+    allow_downgrade = threading.Event()
+    downgrade_done = threading.Event()
+    writer_started = threading.Event()
+    writer_result = {}
+
+    def pause_after_lock(connection, cursor, statement, parameters, context, executemany):
+        if statement.strip().upper().startswith("LOCK TABLE DELIVERY_OUTBOX"):
+            lock_acquired.set()
+            assert allow_downgrade.wait(5)
+
+    event.listen(Engine, "after_cursor_execute", pause_after_lock)
+    try:
+        def downgrade():
+            try:
+                os.environ["DATABASE_URL"] = os.environ["MIKE_TEST_DATABASE_URL"]
+                command.downgrade(Config("alembic.ini"), "20260820_0002")
+            finally:
+                downgrade_done.set()
+
+        def writer_attempt():
+            writer_started.set()
+            transaction = writer.begin()
+            try:
+                writer.execute(text("UPDATE delivery_outbox SET status = 'failed', adapter_attempt_count = 1 WHERE outbox_id = :id"), {"id": entry.outbox_id})
+                transaction.commit()
+                writer_result["value"] = "committed"
+            except Exception as exc:
+                transaction.rollback()
+                writer_result["value"] = exc
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            downgrade_future = pool.submit(downgrade)
+            assert lock_acquired.wait(5)
+            writer_future = pool.submit(writer_attempt)
+            assert writer_started.wait(2)
+            import time
+            time.sleep(0.2)
+            assert not writer_future.done()
+            allow_downgrade.set()
+            downgrade_future.result(timeout=5)
+            writer_future.result(timeout=5)
+    finally:
+        event.remove(Engine, "after_cursor_execute", pause_after_lock)
+        allow_downgrade.set()
+        downgrade_connection.close()
+        writer.close()
+
+    assert isinstance(writer_result.get("value"), Exception)
+    with migrated_engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260820_0002"
+        assert connection.execute(text("SELECT to_regclass('public.delivery_receipts')")).scalar_one() is None
+        assert connection.execute(text("SELECT status FROM delivery_outbox WHERE outbox_id = :id"), {"id": entry.outbox_id}).scalar_one() == "pending"
+    from alembic import command
+    from alembic.config import Config
+    command.upgrade(Config("alembic.ini"), "head")
+
+
 def test_delivery_outbox_schema_has_exact_approved_columns(migrated_engine) -> None:
     from sqlalchemy import inspect
 
@@ -105,7 +310,9 @@ def test_delivery_outbox_schema_has_exact_approved_columns(migrated_engine) -> N
         "response_ready_event_id", "idempotency_key", "channel",
         "external_conversation_id", "outbound_sender_id",
         "outbound_recipient_id", "response_type", "language", "text",
-        "status", "created_at", "schema_version",
+        "status", "created_at", "schema_version", "adapter_attempt_count",
+        "next_attempt_at", "claim_token", "claimed_at", "lease_expires_at",
+        "last_error", "delivery_accepted_event_id",
     }
     event_uniques = {
         constraint["name"]: tuple(constraint["column_names"])
@@ -142,6 +349,7 @@ def test_shared_contract_against_postgresql(migrated_engine) -> None:
         assert_atomic_create_and_append,
         assert_atomic_outbox_append,
         assert_altered_trace_is_rejected,
+        assert_processing_contract,
         assert_canonical_outbox_order,
         assert_delivery_requested_requires_atomic_append,
         assert_exact_version_conflicts,
@@ -160,6 +368,7 @@ def test_shared_contract_against_postgresql(migrated_engine) -> None:
     assert_delivery_requested_requires_atomic_append(factory)
     assert_canonical_outbox_order(factory)
     assert_altered_trace_is_rejected(factory)
+    assert_processing_contract(factory)
 
 
 def test_atomic_create_and_append_rows(journal, migrated_engine) -> None:

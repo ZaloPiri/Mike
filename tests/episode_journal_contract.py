@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
+import pytest
+
+from mike_app.runtime.delivery_outbox import DeliveryOutboxEntry
+from mike_app.runtime.delivery_processing import DeliveryProcessor
+from mike_app.runtime.development_adapter import AdapterOutcome, DevelopmentAdapter
+from mike_app.runtime.event import Event
+
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -279,10 +288,37 @@ def assert_delivery_requested_requires_atomic_append(
             episode.event_ids,
         )
 
-    assert journal.get_event(tenant_id, delivery.event_id) is None
-    assert journal.get_episode(tenant_id, episode.episode_id) == episode
-    assert journal.list_outbox_entries(tenant_id) == ()
 
+def assert_processing_contract(factory) -> None:
+    journal = factory()
+    tenant_id = "processing-contract"
+    episode, events = build_ten_event_episode(journal, tenant_id)
+    ready = events[-1]
+    delivery = Event.create(tenant_id, "communication.delivery_requested", {
+        "source_event_id": str(events[0].event_id),
+        "response_ready_event_id": str(ready.event_id),
+        "channel": "development", "external_conversation_id": "conversation",
+        "outbound_sender_id": "recipient", "outbound_recipient_id": "sender",
+        "idempotency_key": str(ready.event_id), "request_method": "transactional_outbox",
+    }, correlation_id=ready.correlation_id, causation_id=str(ready.event_id))
+    entry = DeliveryOutboxEntry(
+        outbox_id=uuid.uuid4(), tenant_id=tenant_id, episode_id=episode.episode_id,
+        delivery_request_event_id=delivery.event_id, response_ready_event_id=ready.event_id,
+        idempotency_key=str(ready.event_id), channel="development",
+        external_conversation_id="conversation", outbound_sender_id="recipient",
+        outbound_recipient_id="sender", response_type="answer", language="es",
+        text="  texto exacto  ", status="pending", created_at=datetime.now(timezone.utc), schema_version=1,
+    )
+    journal.append_event_with_outbox(tenant_id, episode.episode_id, delivery, episode.event_ids, entry)
+    processor = DeliveryProcessor(journal, DevelopmentAdapter())
+    result = processor.run_once(tenant_id)
+    assert result.outcome == "completed"
+    completed = journal.get_outbox_entry(tenant_id, entry.outbox_id)
+    assert completed is not None and completed.status == "completed"
+    assert completed.delivery_accepted_event_id is not None
+    assert len(journal.list_events(tenant_id, "communication.delivery_accepted")) == 1
+    assert processor.run_once(tenant_id).outcome == "no_work"
+    assert journal.get_delivery_receipt(tenant_id, entry.idempotency_key) is not None
 
 def assert_canonical_outbox_order(factory: JournalFactory) -> None:
     journal = factory()

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Protocol
 
 from mike_app.runtime.delivery_outbox import DeliveryOutboxEntry
 from mike_app.runtime.episode import CognitiveEpisode
 from mike_app.runtime.event import Event
+from mike_app.runtime.delivery_receipt import DeliveryReceipt, ReceiptConflictError, snapshot_hash
 
 
 class EpisodeConcurrencyConflictError(RuntimeError):
@@ -66,6 +69,13 @@ class EpisodeJournal(Protocol):
 
     def total_episode_count(self) -> int: ...
 
+    def claim_one_delivery(self, tenant_id: str, now: datetime, lease_seconds: int) -> DeliveryOutboxEntry | None: ...
+    def get_delivery_receipt(self, tenant_id: str, idempotency_key: str) -> DeliveryReceipt | None: ...
+    def save_delivery_receipt(self, receipt: DeliveryReceipt, claim_token: uuid.UUID) -> DeliveryReceipt: ...
+    def finalize_delivery(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, receipt: DeliveryReceipt) -> DeliveryOutboxEntry: ...
+    def fail_delivery(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, now: datetime, error: str, retry_at: datetime | None) -> DeliveryOutboxEntry: ...
+    def start_adapter_attempt(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, now: datetime) -> DeliveryOutboxEntry: ...
+
 
 class InMemoryEpisodeJournal:
     def __init__(self) -> None:
@@ -78,6 +88,7 @@ class InMemoryEpisodeJournal:
         self._outbox_delivery_event_ids: set[uuid.UUID] = set()
         self._outbox_response_ready_ids: set[uuid.UUID] = set()
         self._outbox_idempotency_keys: set[str] = set()
+        self._receipts_by_key: dict[str, DeliveryReceipt] = {}
         self._lock = Lock()
 
     def create_episode_with_event(
@@ -90,6 +101,7 @@ class InMemoryEpisodeJournal:
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
         _reject_delivery_requested_for_ordinary_append(event)
+        _reject_delivery_accepted_for_ordinary_append(event)
         with self._lock:
             if episode.tenant_id != event.tenant_id:
                 raise ValueError("event tenant does not match episode tenant")
@@ -123,6 +135,7 @@ class InMemoryEpisodeJournal:
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
         _reject_delivery_requested_for_ordinary_append(event)
+        _reject_delivery_accepted_for_ordinary_append(event)
         if not isinstance(expected_event_ids, tuple) or not all(
             isinstance(event_id, uuid.UUID)
             for event_id in expected_event_ids
@@ -293,6 +306,129 @@ class InMemoryEpisodeJournal:
     def total_episode_count(self) -> int:
         with self._lock:
             return len(self._episodes_by_id)
+
+    def claim_one_delivery(self, tenant_id: str, now: datetime, lease_seconds: int) -> DeliveryOutboxEntry | None:
+        self._validate_tenant_id(tenant_id)
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        now = now.astimezone(timezone.utc)
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer")
+        with self._lock:
+            candidates = sorted(self._tenant_outbox.get(tenant_id, ()), key=lambda e: (e.created_at, e.outbox_id))
+            for entry in candidates:
+                eligible = entry.status == "pending" and (entry.next_attempt_at is None or entry.next_attempt_at <= now)
+                expired = entry.status == "processing" and entry.lease_expires_at is not None and entry.lease_expires_at <= now
+                if not (eligible or expired):
+                    continue
+                claimed = replace(entry, status="processing", claim_token=uuid.uuid4(), claimed_at=now, lease_expires_at=now + timedelta(seconds=lease_seconds))
+                self._replace_outbox(claimed)
+                return claimed
+            return None
+
+    def get_delivery_receipt(self, tenant_id: str, idempotency_key: str) -> DeliveryReceipt | None:
+        self._validate_tenant_id(tenant_id)
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise ValueError("idempotency_key must be non-empty")
+        with self._lock:
+            receipt = self._receipts_by_key.get(idempotency_key)
+            return receipt if receipt is not None and receipt.tenant_id == tenant_id else None
+
+    def save_delivery_receipt(self, receipt: DeliveryReceipt, claim_token: uuid.UUID) -> DeliveryReceipt:
+        if not isinstance(receipt, DeliveryReceipt):
+            raise TypeError("receipt must be a DeliveryReceipt")
+        with self._lock:
+            existing = self._receipts_by_key.get(receipt.idempotency_key)
+            if existing is not None:
+                if existing != receipt:
+                    raise ReceiptConflictError("receipt idempotency conflict")
+                return existing
+            entry = self._outbox_by_id.get(receipt.outbox_id)
+            now = datetime.now(timezone.utc)
+            if entry is None or entry.tenant_id != receipt.tenant_id or entry.status != "processing" or entry.claim_token != claim_token or entry.lease_expires_at is None or entry.lease_expires_at <= now:
+                raise ValueError("stale or invalid delivery claim")
+            if receipt.snapshot_hash != snapshot_hash(entry):
+                raise ValueError("receipt outbox not found")
+            self._receipts_by_key[receipt.idempotency_key] = receipt
+            return receipt
+
+    def finalize_delivery(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, receipt: DeliveryReceipt) -> DeliveryOutboxEntry:
+        if not isinstance(claim_token, uuid.UUID):
+            raise TypeError("claim_token must be a uuid.UUID")
+        with self._lock:
+            entry = self._outbox_by_id.get(outbox_id)
+            if entry is None or entry.tenant_id != tenant_id:
+                raise ValueError("outbox not found")
+            if entry.status == "completed":
+                return entry
+            now = datetime.now(timezone.utc)
+            if entry.status != "processing" or entry.claim_token != claim_token or entry.lease_expires_at is None or entry.lease_expires_at <= now:
+                raise ValueError("stale or invalid delivery claim")
+            if not receipt.is_compatible(entry) or self._receipts_by_key.get(receipt.idempotency_key) != receipt:
+                raise ValueError("receipt is not compatible with outbox")
+            episode = self._episodes_by_id.get(entry.episode_id)
+            if episode is None or len(episode.event_ids) != 11 or episode.event_ids[-1] != entry.delivery_request_event_id:
+                raise ValueError("delivery request is not terminal in episode")
+            preceding = tuple(self._events_by_id[event_id] for event_id in episode.event_ids[:-1])
+            _validate_delivery_append(tenant_id, episode.episode_id, preceding, self._events_by_id[entry.delivery_request_event_id], entry)
+            event = Event.create(tenant_id, "communication.delivery_accepted", {
+                "schema_version": 1,
+                "delivery_request_event_id": str(entry.delivery_request_event_id),
+                "response_ready_event_id": str(entry.response_ready_event_id),
+                "outbox_id": str(entry.outbox_id),
+                "receipt_id": str(receipt.receipt_id),
+                "acceptance_method": "development_adapter",
+                "adapter": "development",
+            }, causation_id=str(entry.delivery_request_event_id))
+            delivery_event = self._events_by_id[entry.delivery_request_event_id]
+            event = Event(
+                event_id=event.event_id, tenant_id=tenant_id, event_type=event.event_type,
+                occurred_at=event.occurred_at, payload=event.payload,
+                correlation_id=delivery_event.correlation_id,
+                causation_id=event.causation_id, schema_version=event.schema_version,
+            )
+            updated_episode = episode.add_event(event)
+            completed = replace(entry, status="completed", delivery_accepted_event_id=event.event_id, claim_token=None, claimed_at=None, lease_expires_at=None)
+            self._events_by_id[event.event_id] = event
+            self._tenant_events.setdefault(tenant_id, []).append(event)
+            self._episodes_by_id[episode.episode_id] = updated_episode
+            self._replace_outbox(completed)
+            return completed
+
+    def fail_delivery(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, now: datetime, error: str, retry_at: datetime | None) -> DeliveryOutboxEntry:
+        if not isinstance(error, str) or not error or len(error) > 512:
+            raise ValueError("error must be a bounded non-empty string")
+        with self._lock:
+            entry = self._outbox_by_id.get(outbox_id)
+            if entry is None or entry.tenant_id != tenant_id:
+                raise ValueError("outbox not found")
+            if entry.status != "processing" or entry.claim_token != claim_token or entry.lease_expires_at is None or entry.lease_expires_at <= now:
+                raise ValueError("stale or invalid delivery claim")
+            if entry.idempotency_key in self._receipts_by_key:
+                raise ValueError("successful receipt already exists")
+            status = "pending" if retry_at is not None and entry.adapter_attempt_count < 3 else "failed"
+            updated = replace(entry, status=status, next_attempt_at=retry_at, last_error=error, claim_token=None, claimed_at=None, lease_expires_at=None)
+            self._replace_outbox(updated)
+            return updated
+
+    def start_adapter_attempt(self, tenant_id: str, outbox_id: uuid.UUID, claim_token: uuid.UUID, now: datetime) -> DeliveryOutboxEntry:
+        with self._lock:
+            entry = self._outbox_by_id.get(outbox_id)
+            if entry is None or entry.tenant_id != tenant_id or entry.status != "processing" or entry.claim_token != claim_token or entry.lease_expires_at is None or entry.lease_expires_at <= now:
+                raise ValueError("stale or invalid delivery claim")
+            if entry.adapter_attempt_count >= 3:
+                raise ValueError("maximum adapter attempts exceeded")
+            updated = replace(entry, adapter_attempt_count=entry.adapter_attempt_count + 1)
+            self._replace_outbox(updated)
+            return updated
+
+    def _replace_outbox(self, entry: DeliveryOutboxEntry) -> None:
+        self._outbox_by_id[entry.outbox_id] = entry
+        rows = self._tenant_outbox[entry.tenant_id]
+        for index, old in enumerate(rows):
+            if old.outbox_id == entry.outbox_id:
+                rows[index] = entry
+                return
 
     def _validate_outbox_uniqueness(
         self, entry: DeliveryOutboxEntry
@@ -526,6 +662,13 @@ def _reject_delivery_requested_for_ordinary_append(event: Event) -> None:
     if event.event_type == "communication.delivery_requested":
         raise ValueError(
             "communication.delivery_requested requires atomic outbox append"
+        )
+
+
+def _reject_delivery_accepted_for_ordinary_append(event: Event) -> None:
+    if event.event_type == "communication.delivery_accepted":
+        raise ValueError(
+            "communication.delivery_accepted requires atomic delivery finalization"
         )
 
 

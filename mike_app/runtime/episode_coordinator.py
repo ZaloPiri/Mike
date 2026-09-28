@@ -7,6 +7,7 @@ from mike_app.runtime.episode import CognitiveEpisode
 from mike_app.runtime.episode_journal import (
     EpisodeJournal,
     _reject_delivery_requested_for_ordinary_append,
+    _reject_delivery_accepted_for_ordinary_append,
 )
 from mike_app.runtime.event import Event
 
@@ -26,6 +27,7 @@ class EpisodeCoordinator:
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
         _reject_delivery_requested_for_ordinary_append(event)
+        _reject_delivery_accepted_for_ordinary_append(event)
 
         episode = CognitiveEpisode.create(event, correlation_id=correlation_id)
         return self._episode_journal.create_episode_with_event(episode, event)
@@ -40,6 +42,7 @@ class EpisodeCoordinator:
         if not isinstance(event, Event):
             raise TypeError("event must be an Event instance")
         _reject_delivery_requested_for_ordinary_append(event)
+        _reject_delivery_accepted_for_ordinary_append(event)
 
         episode = self._episode_journal.get_episode(
             event.tenant_id, episode_id

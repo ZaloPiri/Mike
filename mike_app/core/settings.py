@@ -12,6 +12,7 @@ class Settings:
     episode_journal: str | None
     database_url: str | None
     test_database_url: str | None
+    delivery_run_once_enabled: bool = False
 
 
 def get_settings() -> Settings:
@@ -24,6 +25,7 @@ def get_settings() -> Settings:
         episode_journal=os.getenv("MIKE_EPISODE_JOURNAL"),
         database_url=os.getenv("DATABASE_URL"),
         test_database_url=os.getenv("MIKE_TEST_DATABASE_URL"),
+        delivery_run_once_enabled=os.getenv("MIKE_DELIVERY_RUN_ONCE", "false").lower() == "true",
     )
 
 
@@ -34,3 +36,5 @@ def validate_episode_journal_settings(settings: Settings) -> None:
         )
     if settings.episode_journal == "postgres" and not settings.database_url:
         raise ValueError("DATABASE_URL is required when MIKE_EPISODE_JOURNAL=postgres")
+    if settings.delivery_run_once_enabled and settings.environment != "development":
+        raise ValueError("MIKE_DELIVERY_RUN_ONCE can only be enabled in development")
