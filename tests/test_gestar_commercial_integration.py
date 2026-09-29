@@ -308,3 +308,27 @@ def test_real_gestar_errors_and_binding_are_not_accepted_as_success(integrated_s
                                                 json={"items": [{"product_id": ids[0], "quantity": 1}]})
             assert response.status_code == 409
             assert "Bearer" not in response.text and TOKEN not in response.text
+
+
+def test_real_catalog_page_selection_then_quote_and_deactivated_product(integrated_stack):
+    settings, ids, _, engine, effect_models, port = integrated_stack
+    before = {model: Session(engine).query(model).count() for model in effect_models}
+    with httpx.Client() as catalog_http:
+        page = catalog_http.get(f"http://127.0.0.1:{port}/api/v1/commercial/products?limit=2",
+                                headers={"Authorization": f"Bearer {TOKEN}"})
+        assert page.status_code == 200
+        selected = page.json()["products"][0]
+        assert selected["product_id"] == ids[0]
+        assert page.json()["next_cursor"]
+    with TestClient(create_app(settings)) as mike:
+        quoted = mike.post("/dev/commercial/quote", headers={"X-MIKE-Development-Key": "synthetic-local-key"},
+                           json={"items": [{"product_id": selected["product_id"], "quantity": 4}]})
+        assert quoted.status_code == 200 and quoted.json()["lines"][0]["product_id"] == selected["product_id"]
+        from app.models import Product
+        with Session(engine) as db:
+            db.get(Product, selected["product_id"]).activo = False; db.commit()
+        rejected = mike.post("/dev/commercial/quote", headers={"X-MIKE-Development-Key": "synthetic-local-key"},
+                             json={"items": [{"product_id": selected["product_id"], "quantity": 4}]})
+        assert rejected.status_code == 422
+    with Session(engine) as db:
+        assert {model: db.query(model).count() for model in effect_models} == before

@@ -76,6 +76,22 @@ class GestarCommercialConfig:
                    settings.gestar_tenant_id)
 
 
+@dataclass(frozen=True)
+class CatalogProduct:
+    product_id: int
+    name: str
+    code: str | None
+    unit: str
+
+
+@dataclass(frozen=True)
+class CatalogPage:
+    installation_id: str
+    business_id: str
+    products: tuple[CatalogProduct, ...]
+    next_cursor: str | None
+
+
 def _strict_positive(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise CommercialProtocolError(f"invalid {field}")
@@ -230,6 +246,55 @@ class GestarCommercialClient:
 
     def close(self) -> None:
         self._client.close()
+
+    def list_products(self, query: str = "", limit: int = 50, cursor: str | None = None) -> CatalogPage:
+        if not isinstance(query, str) or len(query) > 100 or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise CommercialProtocolError("invalid catalog query")
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 256):
+            raise CommercialProtocolError("invalid catalog cursor")
+        started = time.monotonic()
+        params: dict[str, str | int] = {"query": query, "limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        try:
+            response = self._client.get(
+                f"{self.config.base_url}/api/v1/commercial/products",
+                params=params,
+                headers={"Authorization": f"Bearer {self.config.bearer_token}", "Accept": "application/json"},
+                timeout=max(0.001, self.config.timeout_seconds - (time.monotonic() - started)),
+            )
+        except httpx.TimeoutException as exc:
+            raise CommercialTimeoutError() from exc
+        except httpx.HTTPError as exc:
+            raise CommercialClientError() from exc
+        if time.monotonic() - started > self.config.timeout_seconds:
+            raise CommercialTimeoutError()
+        if response.status_code >= 400:
+            try:
+                code = response.json().get("error", {}).get("code", "commercial_source_rejected")
+            except (ValueError, AttributeError):
+                code = "commercial_source_invalid_json"
+            raise CommercialSourceError(response.status_code, code)
+        try:
+            payload = response.json()
+            if (not isinstance(payload, dict) or payload.get("installation_id") != self.config.installation_id
+                    or payload.get("business_id") != self.config.business_id
+                    or not isinstance(payload.get("products"), list)):
+                raise CommercialProtocolError("incompatible catalog response")
+            products = []
+            for item in payload["products"]:
+                if (not isinstance(item, dict) or isinstance(item.get("product_id"), bool)
+                        or not isinstance(item.get("product_id"), int) or item["product_id"] <= 0
+                        or not isinstance(item.get("name"), str) or not isinstance(item.get("unit"), str)
+                        or (item.get("code") is not None and not isinstance(item["code"], str))):
+                    raise CommercialProtocolError("invalid catalog product")
+                products.append(CatalogProduct(item["product_id"], item["name"], item.get("code"), item["unit"]))
+            next_cursor = payload.get("next_cursor")
+            if next_cursor is not None and (not isinstance(next_cursor, str) or len(next_cursor) > 256):
+                raise CommercialProtocolError("invalid catalog cursor")
+            return CatalogPage(self.config.installation_id, self.config.business_id, tuple(products), next_cursor)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise CommercialProtocolError("invalid catalog JSON") from exc
 
     def quote(self, items: list[dict[str, int]]) -> dict[str, Any]:
         if not 1 <= len(items) <= 50:

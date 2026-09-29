@@ -9,13 +9,14 @@ ADR-0011 y el bloque B ya definen una consulta comercial de solo lectura:
 Gestar es la autoridad, MIKE envía IDs y cantidades explícitos, y la
 cotización se valida completa antes de presentarse. La demo local actual
 (`tools/gestar_demo.py`) usa un catálogo sintético conocido por el lanzador;
-no consulta todavía `GET /api/v1/commercial/products` ni mantiene un carrito.
+Antes de esta decisión, la demo no consultaba `GET /api/v1/commercial/products`
+ni mantenía un carrito; el estado aceptado actual sí realiza ambas operaciones.
 
 Esta propuesta agrega únicamente la selección explícita desde catálogo y el
 armado temporal de un carrito para la primera interfaz de terminal. No
 interpreta lenguaje libre ni convierte la consulta en pedido.
 
-## Decisión propuesta
+## Decisión
 
 ### Frontera
 
@@ -138,14 +139,13 @@ Reutilizable sin cambiar su semántica:
 - `mike_app/api/dev_commercial.py`: protección development-only y la ruta de
   cotización existente; no debe aceptar catálogo ni tenant del caller.
 - `tools/gestar_demo.py`: lifecycle temporal, router real de Gestar, fixtures
-  sintéticos y presentación de cotizaciones; hoy su catálogo está codificado
-  para la demo y deberá reemplazarse por la consulta API.
+  sintéticos, catálogo HTTP, carrito y presentación de cotizaciones.
 - `Settings`: binding y credenciales ya configurados; la nueva operación no
   debe introducir configuración por request.
 
-Falta definir e implementar el método de catálogo, el modelo estricto de
-producto/página, el estado de carrito en la demo y sus pruebas. No falta un
-motor de precios en MIKE: seguirá perteneciendo a Gestar.
+El método de catálogo, el modelo estricto de producto/página y el estado de
+carrito están implementados en el alcance de esta decisión. El motor de
+precios sigue perteneciendo exclusivamente a Gestar.
 
 ## Errores
 
@@ -198,22 +198,20 @@ Enviar el carrito completo a la operación existente, ejecutar escenarios
 sintéticos y verificar que catálogo y cotización no producen efectos
 comerciales. Solo después evaluar otra interfaz supervisada.
 
-## Decisiones pendientes
+## Estado operativo y ampliaciones futuras
 
-- Si agregar nuevamente debe reemplazar siempre o requerir una confirmación
-  visible en cada caso.
-- Texto exacto de los comandos de terminal y si se permite seleccionar por
-  código además de ID.
-- Política de renovación de páginas si el catálogo cambia entre cursores;
-  el contrato no promete snapshot estable.
-- Si una sesión futura necesita persistencia explícita; esta propuesta la
-  mantiene deliberadamente efímera.
-- Evidencia de carga representativa antes de habilitar los límites
-  provisionales.
+- La sintaxis exacta de los comandos de terminal es implementación de la
+  demo; la regla de reemplazo con confirmación ya está decidida arriba.
+- Una futura interfaz podrá definir su propia política de renovación de
+  páginas; el contrato no promete snapshot estable.
+- Una futura sesión podrá decidir persistencia explícita; esta demo es
+  deliberadamente efímera.
+- La evidencia de carga representativa sigue siendo un requisito operativo
+  antes de habilitar los límites provisionales.
 
-Estas decisiones siguen propuestas. Este ADR no acepta rutas nuevas, no
-activa la integración, no cambia eventos 1–12 ni Phase 24 y no autoriza
-pedidos, ventas, reservas, cobros, stock o datos comerciales reales.
+Estas ampliaciones no forman parte de este bloque. El ADR no agrega rutas
+nuevas, no activa la integración, no cambia eventos 1–12 ni Phase 24 y no
+autoriza pedidos, ventas, reservas, cobros, stock o datos comerciales reales.
 
 ## Fuera de alcance
 

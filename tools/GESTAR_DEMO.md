@@ -9,11 +9,17 @@ Desde PowerShell:
 .venv\Scripts\python.exe tools\gestar_demo.py
 ```
 
-La pantalla está marcada **DEMOSTRACIÓN CON DATOS FICTICIOS**. Muestra el
-catálogo, sus IDs, carrito, total ARS, desglose, promociones, grupos,
-advertencias, tiempos y errores. Ejemplos predefinidos: `simple`, `paquetes`,
-`promocion`, `mixto` y `benchmark`. También puede ingresar `id=cantidad,id=cantidad`,
-por ejemplo `1=4,2=8`. Salga con `salir` o `Ctrl+C`.
+La pantalla está marcada **DEMOSTRACIÓN CON DATOS FICTICIOS** y consulta el
+catálogo real de Gestar antes de mostrarlo. Muestra IDs, nombres, unidad,
+carrito, total ARS, desglose, promociones, grupos, advertencias, tiempos y
+errores. Ejemplos predefinidos: `simple`, `paquetes`, `promocion`, `mixto` y
+`benchmark`.
+
+Comandos interactivos: `buscar TEXTO`, `agregar ID CANTIDAD`, `modificar ID
+CANTIDAD`, `quitar ID`, `carrito`, `cotizar` y `salir`. Agregar un ID ya
+presente pide confirmación y reemplaza solo si se responde `s`; nunca suma en
+silencio. Cambiar la búsqueda no borra el carrito. Un carrito vacío no se
+envía. La interfaz selecciona exclusivamente IDs de la página consultada.
 
 Para verificar todos los recorridos sin interacción:
 

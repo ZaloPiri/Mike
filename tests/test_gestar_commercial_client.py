@@ -57,6 +57,32 @@ def test_quote_sends_only_items_and_validates_complete_response():
     assert result["total"] == "400.00"
 
 
+def test_list_products_validates_identity_and_cursor():
+    def handler(request):
+        assert request.url.path == "/api/v1/commercial/products"
+        assert request.url.params["query"] == "jamón"
+        return httpx.Response(200, json={"installation_id": "lasandwicheria-local", "business_id": "lasandwicheria",
+                                         "products": [{"product_id": 17, "name": "Jamón", "code": None, "unit": "unidad"}],
+                                         "next_cursor": "next"})
+    client = _client(handler)
+    try:
+        page = client.list_products("jamón", 1)
+    finally:
+        client.close()
+    assert page.products[0].product_id == 17 and page.next_cursor == "next"
+
+
+def test_list_products_rejects_incompatible_identity_and_invalid_limits():
+    client = _client(lambda request: httpx.Response(200, json={"installation_id": "other", "business_id": "lasandwicheria", "products": [], "next_cursor": None}))
+    try:
+        with pytest.raises(CommercialProtocolError):
+            client.list_products(limit=101)
+        with pytest.raises(CommercialProtocolError):
+            client.list_products()
+    finally:
+        client.close()
+
+
 @pytest.mark.parametrize("body", [
     [{"product_id": True, "quantity": 1}],
     [{"product_id": 1, "quantity": 0}],
