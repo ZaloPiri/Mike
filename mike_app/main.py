@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from mike_app.api.dev_inspection import router as dev_inspection_router
 from mike_app.api.dev_messages import router as dev_messages_router
+from mike_app.api.dev_commercial import router as dev_commercial_router
 from mike_app.api.health import router as health_router
 from mike_app.communication.target_resolution import (
     ConversationResponseTargetResolver,
@@ -269,6 +270,7 @@ def _configure_app(app: FastAPI, episode_journal) -> None:
     app.state.delivery_processor = DeliveryProcessor(
         episode_journal, DevelopmentAdapter()
     )
+    app.state.gestar_commercial_client = None
 
 
 
@@ -289,10 +291,18 @@ async def lifespan(app: FastAPI):
             _configure_app(app, journal)
             yield
         finally:
+            client = getattr(app.state, "gestar_commercial_client", None)
+            if client is not None:
+                client.close()
             engine.dispose()
         return
     _configure_app(app, InMemoryEpisodeJournal())
-    yield
+    try:
+        yield
+    finally:
+        client = getattr(app.state, "gestar_commercial_client", None)
+        if client is not None:
+            client.close()
 
 
 def create_app(app_settings: Settings | None = None) -> FastAPI:
@@ -302,6 +312,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
     created.include_router(health_router)
     created.include_router(dev_messages_router)
     created.include_router(dev_inspection_router)
+    created.include_router(dev_commercial_router)
     return created
 
 

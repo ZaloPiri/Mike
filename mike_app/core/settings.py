@@ -13,6 +13,13 @@ class Settings:
     database_url: str | None
     test_database_url: str | None
     delivery_run_once_enabled: bool = False
+    gestar_commercial_enabled: bool = False
+    gestar_base_url: str | None = None
+    gestar_bearer_token: str | None = None
+    gestar_installation_id: str | None = None
+    gestar_business_id: str | None = None
+    gestar_tenant_id: str | None = None
+    gestar_dev_key: str | None = None
 
 
 def get_settings() -> Settings:
@@ -26,6 +33,13 @@ def get_settings() -> Settings:
         database_url=os.getenv("DATABASE_URL"),
         test_database_url=os.getenv("MIKE_TEST_DATABASE_URL"),
         delivery_run_once_enabled=os.getenv("MIKE_DELIVERY_RUN_ONCE", "false").lower() == "true",
+        gestar_commercial_enabled=os.getenv("MIKE_GESTAR_COMMERCIAL_ENABLED", "false").lower() == "true",
+        gestar_base_url=os.getenv("MIKE_GESTAR_BASE_URL"),
+        gestar_bearer_token=os.getenv("MIKE_GESTAR_BEARER_TOKEN"),
+        gestar_installation_id=os.getenv("MIKE_GESTAR_INSTALLATION_ID"),
+        gestar_business_id=os.getenv("MIKE_GESTAR_BUSINESS_ID"),
+        gestar_tenant_id=os.getenv("MIKE_GESTAR_TENANT_ID"),
+        gestar_dev_key=os.getenv("MIKE_GESTAR_DEV_KEY"),
     )
 
 
