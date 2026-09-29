@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -31,6 +32,7 @@ from mike_app.main import create_app
 
 
 GESTAR = Path(r"C:\Users\Ana\Desktop\GESTAR-mike-base")
+GESTAR_EXPECTED_HEAD = "272a5bbd641b925adc3bd814ea2d486e64f15e8d"
 TOKEN = "synthetic-integration-token"
 
 
@@ -42,6 +44,10 @@ def _free_port() -> int:
 
 @pytest.fixture
 def integrated_stack(tmp_path, monkeypatch):
+    observed_head = subprocess.check_output(
+        ["git", "-C", str(GESTAR), "rev-parse", "HEAD"], text=True
+    ).strip()
+    assert observed_head == GESTAR_EXPECTED_HEAD
     monkeypatch.syspath_prepend(str(GESTAR))
     from app.database import Base, get_db
     from app.models import (Category, MixedPriceGroup, MixedPriceGroupItem,
@@ -72,7 +78,7 @@ def integrated_stack(tmp_path, monkeypatch):
         db.flush()
         products = [
             Product(nombre=f"Producto {name}", categoria=category, activo=True, controla_stock=False)
-            for name in "ABCDEF"
+            for name in "ABCDEFGH"
         ]
         missing = Product(nombre="Sin precio", categoria=category, activo=True, controla_stock=False)
         db.add_all(products + [missing])
@@ -84,11 +90,11 @@ def integrated_stack(tmp_path, monkeypatch):
         ])
         group = MixedPriceGroup(nombre="Grupo sintético", precio_media_docena=Decimal("500"),
                                 precio_docena=Decimal("900"), activo=True)
-        group.items = [MixedPriceGroupItem(product_id=product.id) for product in products]
+        group.items = [MixedPriceGroupItem(product_id=product.id) for product in products[:6]]
         promotion = Promotion(nombre="Promo sintética", precio_final=Decimal("100"),
                               fecha_inicio=date(2020, 1, 1), repetible=True, prioridad=1)
-        promotion.items = [PromotionItem(product_id=products[0].id, cantidad=2),
-                           PromotionItem(product_id=products[1].id, cantidad=1)]
+        promotion.items = [PromotionItem(product_id=products[6].id, cantidad=2),
+                           PromotionItem(product_id=products[7].id, cantidad=1)]
         db.add_all([group, promotion])
         db.commit()
         ids = [product.id for product in products]
@@ -179,17 +185,107 @@ def test_real_mike_http_client_reaches_gestar_router_and_keeps_both_sides_read_o
         assert half_dozen.json()["total"] == "500.00"
         assert dozen.json()["total"] == "900.00"
         mixed = mike.post("/dev/commercial/quote", headers={"X-MIKE-Development-Key": "synthetic-local-key"},
-                          json={"items": [{"product_id": product_id, "quantity": 2} for product_id in ids]})
+                          json={"items": [{"product_id": current_id, "quantity": 2} for current_id in ids[:6] ]})
         assert mixed.status_code == 200
         assert mixed.json()["total"] == "900.00"
         promo = mike.post("/dev/commercial/quote", headers={"X-MIKE-Development-Key": "synthetic-local-key"},
-                          json={"items": [{"product_id": ids[0], "quantity": 4}, {"product_id": ids[1], "quantity": 2}]})
+                          json={"items": [{"product_id": ids[6], "quantity": 4}, {"product_id": ids[7], "quantity": 2}]})
         assert promo.status_code == 200
         assert promo.json()["promotions_applied"][0]["times"] == 2
         assert promo.json()["total"] == "200.00"
         assert mike.post("/dev/commercial/quote", headers={"X-MIKE-Development-Key": "synthetic-local-key"},
                          json={"items": [{"product_id": missing_id, "quantity": 1}]}).status_code == 422
     after = {model: count for model, count in ((model, Session(engine).query(model).count()) for model in effect_models)}
+    assert after == before
+
+
+def test_benchmark_cart_promotion_and_mixed_group_through_mike(integrated_stack):
+    settings, ids, _, engine, effect_models, _ = integrated_stack
+    before = {model: Session(engine).query(model).count() for model in effect_models}
+    items = [{"product_id": ids[6], "quantity": 4}, {"product_id": ids[7], "quantity": 2}]
+    items.extend({"product_id": product_id, "quantity": 2} for product_id in ids[:6])
+    started = time.perf_counter()
+    with TestClient(create_app(settings)) as mike:
+        response = mike.post("/dev/commercial/quote",
+                             headers={"X-MIKE-Development-Key": "synthetic-local-key"},
+                             json={"items": items})
+    elapsed = time.perf_counter() - started
+    assert response.status_code == 200, response.text
+    body = response.json()
+    print(f"MIKE_GESTAR_BENCHMARK_ELAPSED_SECONDS={elapsed:.6f}")
+    assert elapsed < 5.0
+    assert body["promotions_applied"] and body["promotions_applied"][0]["times"] == 2
+    assert body["mixed_groups_applied"] and body["mixed_groups_applied"][0]["times"] >= 1
+    requested = {item["product_id"]: item["quantity"] for item in items}
+    consumed = {product_id: 0 for product_id in requested}
+    for entry in body["promotions_applied"] + body["mixed_groups_applied"]:
+        for component in entry["components"]:
+            consumed[component["product_id"]] += component["quantity"]
+    for line in body["lines"]:
+        assert requested[line["product_id"]] == (
+            line["promotion_quantity"] + line["mixed_group_quantity"] + line["remaining_quantity"]
+        )
+        assert consumed[line["product_id"]] == line["promotion_quantity"] + line["mixed_group_quantity"]
+    assert body["total"] == "1100.00"
+    after = {model: Session(engine).query(model).count() for model in effect_models}
+    assert after == before
+
+
+def test_committed_mixed_plus_promotion_benchmark_through_mike(integrated_stack):
+    """Reproduce Gestar benchmark case mixed_plus_promotion exactly.
+
+    Source: tests/benchmark_commercial_limits.py and
+    tests/test_pricing_engine_optimization.py at Gestar HEAD 272a5bb.
+    """
+    settings, ids, _, engine, effect_models, _ = integrated_stack
+    from app.models import Promotion, PromotionItem
+
+    with Session(engine) as db:
+        db.query(PromotionItem).delete()
+        db.query(Promotion).delete()
+        for n in range(2):
+            promotion = Promotion(
+                nombre=f"Benchmark Promo {n}", precio_final=Decimal("900"),
+                fecha_inicio=date(2020, 1, 1), activa=True,
+                prioridad=n, repetible=True,
+            )
+            promotion.items = [
+                PromotionItem(product_id=ids[n], cantidad=2),
+                PromotionItem(product_id=ids[n + 1], cantidad=2),
+            ]
+            db.add(promotion)
+        db.commit()
+        before = {model: db.query(model).count() for model in effect_models}
+
+    started = time.perf_counter()
+    with TestClient(create_app(settings)) as mike:
+        response = mike.post(
+            "/dev/commercial/quote",
+            headers={"X-MIKE-Development-Key": "synthetic-local-key"},
+            json={"items": [{"product_id": product_id, "quantity": 6} for product_id in ids[:6]]},
+        )
+    elapsed = time.perf_counter() - started
+    assert response.status_code == 200, response.text
+    body = response.json()
+    print(f"MIKE_GESTAR_COMMITTED_BENCHMARK_ELAPSED_SECONDS={elapsed:.6f}")
+    assert elapsed < 5.0
+    assert body["total"] == "2700.00"
+    assert body["promotions_applied"] == []
+    assert [(entry["size"], entry["times"], entry["subtotal"]) for entry in body["mixed_groups_applied"]] == [(12, 3, "2700.00")]
+    assert [line["remaining_quantity"] for line in body["lines"]] == [0] * 6
+    assert body["pricing_breakdown"] == []
+    consumed = {
+        line["product_id"]: sum(
+            component["quantity"]
+            for group in body["mixed_groups_applied"]
+            for component in group["components"]
+            if component["product_id"] == line["product_id"]
+        )
+        for line in body["lines"]
+    }
+    assert all(consumed[line["product_id"]] == line["quantity"] for line in body["lines"])
+    with Session(engine) as db:
+        after = {model: db.query(model).count() for model in effect_models}
     assert after == before
 
 
