@@ -43,9 +43,9 @@ de ese `y` comienza otra cantidad explícita. Cada cláusula tiene la forma:
 [quiero ] cantidad [de ] nombre-del-producto
 ```
 
-Se admiten cifras enteras positivas y las palabras `uno` a `doce`, además de
-`media docena` y `una docena`. La expresión original de cantidad y su valor
-(6 o 12) se conservan; la conversión solo podrá autorizarse después de
+Se admiten cifras enteras positivas hasta 10.000 por línea, y las palabras
+`uno` a `doce`, además de `media docena` y `una docena`. La expresión original
+de cantidad y su valor (6 o 12) se conservan; la conversión solo podrá autorizarse después de
 validar la unidad real devuelta por Gestar. No se convierten peso, volumen ni
 paquetes.
 
