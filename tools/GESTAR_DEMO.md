@@ -3,10 +3,10 @@
 Requisitos: el `.venv` de MIKE y Gestar en `mike-commercial-base`, revisión
 `272a5bbd641b925adc3bd814ea2d486e64f15e8d`.
 
-Desde PowerShell:
+Desde PowerShell, situado en la raíz de MIKE:
 
 ```powershell
-.venv\Scripts\python.exe tools\gestar_demo.py
+.venv\Scripts\python.exe -m tools.gestar_demo
 ```
 
 La pantalla está marcada **DEMOSTRACIÓN CON DATOS FICTICIOS** y consulta el
@@ -45,7 +45,7 @@ puede escribir `pagina` antes del ID para consultar el cursor siguiente.
 Para verificar todos los escenarios predefinidos sin interacción:
 
 ```powershell
-.venv\Scripts\python.exe tools\gestar_demo.py --scenario simple --scenario paquetes --scenario promocion --scenario mixto --scenario benchmark
+.venv\Scripts\python.exe -m tools.gestar_demo --scenario simple --scenario paquetes --scenario promocion --scenario mixto --scenario benchmark
 ```
 
 La terminal llama por HTTP al endpoint real de MIKE; MIKE usa su cliente HTTP

@@ -190,6 +190,7 @@ def main():
         cart = TerminalCart(ids)
         controller = DemoController(catalog_client, cart, lambda items: quote(base, key, items))
         print("DEMOSTRACIÓN CON DATOS FICTICIOS — no crea ni reserva pedidos"); print("Catálogo consultado a Gestar:", ", ".join(f"{p}: {n}" for p,n in catalog)); print("Use simple/paquetes/promocion/mixto/benchmark, buscar texto, agregar id cantidad, modificar id cantidad, quitar id, carrito, cotizar o salir.")
+        print("Ayuda: lenguaje <texto> busca menciones, muestra candidatos y exige seleccionar IDs; confirmar aplica la propuesta y no cotiza. Use cotizar por separado. Comandos manuales: buscar texto, agregar id cantidad, modificar id cantidad, quitar id, carrito, cotizar, salir.")
         for name in args.scenario or []: print(f"\nEscenario: {name}"); quote(base, key, presets[name])
         while not args.scenario:
             command = input("demo> ").strip().lower()
