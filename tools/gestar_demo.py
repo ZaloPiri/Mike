@@ -8,25 +8,11 @@ import httpx, uvicorn
 from fastapi import FastAPI
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from mike_app.commercial.cart import TerminalCart
 
 ROOT = Path(__file__).resolve().parents[1]
 GESTAR = Path(r"C:\Users\Ana\Desktop\GESTAR-mike-base")
 GESTAR_HEAD = "272a5bbd641b925adc3bd814ea2d486e64f15e8d"
-
-class TerminalCart:
-    def __init__(self, allowed_ids): self.allowed_ids = set(allowed_ids); self.lines = {}
-    def add(self, product_id, quantity, replace=False):
-        if product_id not in self.allowed_ids or isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= 10000: raise ValueError("línea inválida")
-        if product_id in self.lines and not replace: return False
-        self.lines[product_id] = quantity; return True
-    def modify(self, product_id, quantity):
-        if product_id not in self.lines: raise KeyError(product_id)
-        if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= 10000: raise ValueError("línea inválida")
-        self.lines[product_id] = quantity
-        return True
-    def remove(self, product_id): self.lines.pop(product_id, None)
-    def items(self): return [{"product_id": p, "quantity": q} for p, q in self.lines.items()]
-    def clear(self): self.lines.clear()
 
 def free_port():
     with socket.socket() as sock:

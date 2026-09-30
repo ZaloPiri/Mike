@@ -1,6 +1,6 @@
 import pytest
 
-from tools.gestar_demo import TerminalCart
+from mike_app.commercial.cart import TerminalCart
 
 
 def test_cart_add_modify_remove_and_empty():
