@@ -332,3 +332,33 @@ def test_real_catalog_page_selection_then_quote_and_deactivated_product(integrat
         assert rejected.status_code == 422
     with Session(engine) as db:
         assert {model: db.query(model).count() for model in effect_models} == before
+
+
+def test_real_catalog_search_page_and_explicit_selection(integrated_stack):
+    settings, ids, _, engine, effect_models, _ = integrated_stack
+    from mike_app.commercial.catalog_resolution import CatalogResolution, ResolutionStatus
+    from mike_app.commercial.gestar_client import GestarCommercialClient, GestarCommercialConfig
+    from mike_app.commercial.language_interpreter import interpret
+
+    before = {model: Session(engine).query(model).count() for model in effect_models}
+    client = GestarCommercialClient(GestarCommercialConfig(
+        settings.gestar_base_url, TOKEN, settings.gestar_installation_id,
+        settings.gestar_business_id, settings.gestar_tenant_id,
+    ))
+    try:
+        resolution = CatalogResolution.from_interpretation(interpret("quiero 6 de Producto A"))
+        resolution = resolution.search(client, 0, limit=1)
+        assert resolution.mentions[0].status is ResolutionStatus.PENDING_SELECTION
+        assert resolution.mentions[0].page is not None
+        selected_id = resolution.mentions[0].page.products[0].product_id
+        assert selected_id == ids[0]
+        with pytest.raises(ValueError):
+            resolution.select(0, ids[1])
+        resolved = resolution.select(0, selected_id)
+        assert resolved.mentions[0].status is ResolutionStatus.RESOLVED
+        assert resolved.mentions[0].mention.quantity == 6
+        assert resolved.mentions[0].mention.quantity_text == "6"
+    finally:
+        client.close()
+    with Session(engine) as db:
+        assert {model: db.query(model).count() for model in effect_models} == before

@@ -46,8 +46,13 @@ de ese `y` comienza otra cantidad explícita. Cada cláusula tiene la forma:
 Se admiten cifras enteras positivas hasta 10.000 por línea, y las palabras
 `uno` a `doce`, además de `media docena` y `una docena`. La expresión original
 de cantidad y su valor (6 o 12) se conservan; la conversión solo podrá autorizarse después de
-validar la unidad real devuelta por Gestar. No se convierten peso, volumen ni
-paquetes.
+validar la unidad real devuelta por Gestar. La decisión aprobada el
+2026-09-30 fija que `unit == "unidad"` representa una unidad individual:
+`media docena` corresponde a 6 y `una docena` a 12 unidades. No se agregan
+equivalencias por mayúsculas, plurales ni sinónimos; otros valores requieren
+aclaración. Esta conversión determina únicamente cantidades. Gestar conserva
+la autoridad sobre precios, paquetes, promociones, grupos mixtos,
+disponibilidad y reservas al cotizar. No se convierten peso ni volumen.
 
 Los nombres pueden contener `y`; por eso no se divide cada frase por esa
 conjunción. Una asociación como “6 de jamón y queso y 6 de pollo” solo se
