@@ -15,13 +15,34 @@ carrito, total ARS, desglose, promociones, grupos, advertencias, tiempos y
 errores. Ejemplos predefinidos: `simple`, `paquetes`, `promocion`, `mixto` y
 `benchmark`.
 
-Comandos interactivos: `buscar TEXTO`, `agregar ID CANTIDAD`, `modificar ID
-CANTIDAD`, `quitar ID`, `carrito`, `cotizar` y `salir`. Agregar un ID ya
-presente pide confirmación y reemplaza solo si se responde `s`; nunca suma en
-silencio. Cambiar la búsqueda no borra el carrito. Un carrito vacío no se
-envía. La interfaz selecciona exclusivamente IDs de la página consultada.
+Comandos interactivos: `lenguaje quiero 4 de Producto A y 6 de Producto B`,
+`buscar TEXTO`, `agregar ID CANTIDAD`, `modificar ID CANTIDAD`, `quitar ID`,
+`carrito`, `cotizar` y `salir`. `lenguaje TEXTO` interpreta solo la gramática
+determinista aprobada, busca cada mención en Gestar, exige seleccionar cada
+ID mostrado, presenta una propuesta `add` o `replace` y pide `s` para
+confirmarla o cualquier otra respuesta para cancelarla. Confirmar no cotiza.
 
-Para verificar todos los recorridos sin interacción:
+Agregar un ID ya presente pide confirmación y reemplaza solo si se responde
+`s`; nunca suma en silencio. Cambiar la búsqueda no borra el carrito. Un
+carrito vacío no se envía. La interfaz selecciona exclusivamente IDs de la
+página consultada.
+
+Secuencia reproducible de lenguaje y cotización:
+
+```text
+lenguaje quiero 4 de Producto A y 6 de Producto B
+1
+2
+s
+carrito
+cotizar
+salir
+```
+
+La selección y la confirmación son explícitas; si se muestra `pagina`, se
+puede escribir `pagina` antes del ID para consultar el cursor siguiente.
+
+Para verificar todos los escenarios predefinidos sin interacción:
 
 ```powershell
 .venv\Scripts\python.exe tools\gestar_demo.py --scenario simple --scenario paquetes --scenario promocion --scenario mixto --scenario benchmark
@@ -34,6 +55,7 @@ Usa únicamente SQLite temporal, credenciales efímeras, loopback y journal
 crea ni reserva pedidos. Los servidores, clientes, conexiones y archivos
 temporales se cierran/eliminan al salir, incluso con `Ctrl+C`.
 
-Demuestra cotización de consulta. No demuestra resolución de lenguaje,
-continuidad conversacional, pedidos, cobros, facturación, reservas ni
-disponibilidad futura.
+Demuestra resolución determinista supervisada, selección por catálogo,
+propuesta temporal y cotización de consulta. No demuestra continuidad
+conversacional, pedidos, cobros, facturación, reservas ni disponibilidad
+futura.

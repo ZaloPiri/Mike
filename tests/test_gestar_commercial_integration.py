@@ -362,3 +362,45 @@ def test_real_catalog_search_page_and_explicit_selection(integrated_stack):
         client.close()
     with Session(engine) as db:
         assert {model: db.query(model).count() for model in effect_models} == before
+
+
+def test_real_language_selection_proposal_and_explicit_quote(integrated_stack):
+    settings, ids, _, engine, effect_models, _ = integrated_stack
+    from mike_app.commercial.gestar_client import GestarCommercialClient, GestarCommercialConfig
+    from tools.gestar_demo import DemoController
+
+    before = {model: Session(engine).query(model).count() for model in effect_models}
+    catalog = GestarCommercialClient(GestarCommercialConfig(
+        settings.gestar_base_url, TOKEN, settings.gestar_installation_id,
+        settings.gestar_business_id, settings.gestar_tenant_id,
+    ))
+    try:
+        cart = __import__("mike_app.commercial.cart", fromlist=["TerminalCart"]).TerminalCart(ids)
+        responses = []
+        with TestClient(create_app(settings)) as mike:
+            def quote(items):
+                response = mike.post("/dev/commercial/quote",
+                                     headers={"X-MIKE-Development-Key": "synthetic-local-key"},
+                                     json={"items": items})
+                responses.append(response)
+                return response
+
+            answers = iter([str(ids[0]), str(ids[1]), "s"])
+            demo = DemoController(catalog, cart, quote, input_fn=lambda _: next(answers), output_fn=lambda _: None)
+            assert demo.process("lenguaje quiero 4 de Producto A y 6 de Producto B") is True
+            assert cart.items() == [{"product_id": ids[0], "quantity": 4}, {"product_id": ids[1], "quantity": 6}]
+            assert responses == []
+            assert demo.process("cotizar") is True
+        assert len(responses) == 1
+        assert responses[0].status_code == 200, responses[0].text
+        body = responses[0].json()
+        assert [(line["product_id"], line["quantity"]) for line in body["lines"]] == [(ids[0], 4), (ids[1], 6)]
+        assert body["total"] == "900.00"
+        assert body["mixed_groups_applied"]
+        consumed = sum(component["quantity"] for group in body["mixed_groups_applied"]
+                        for component in group["components"])
+        assert consumed == sum(line["mixed_group_quantity"] for line in body["lines"])
+    finally:
+        catalog.close()
+    with Session(engine) as db:
+        assert {model: db.query(model).count() for model in effect_models} == before

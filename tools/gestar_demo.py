@@ -9,6 +9,9 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from mike_app.commercial.cart import TerminalCart
+from mike_app.commercial.catalog_resolution import CatalogResolution, ResolutionStatus
+from mike_app.commercial.cart import CartProposalError
+from mike_app.commercial.language_interpreter import interpret
 
 ROOT = Path(__file__).resolve().parents[1]
 GESTAR = Path(r"C:\Users\Ana\Desktop\GESTAR-mike-base")
@@ -17,6 +20,105 @@ GESTAR_HEAD = "272a5bbd641b925adc3bd814ea2d486e64f15e8d"
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0)); return sock.getsockname()[1]
+
+
+class DemoController:
+    """Command controller used by the interactive demo and its focused tests."""
+    def __init__(self, catalog_client, cart, quote_fn, input_fn=input, output_fn=print):
+        self.catalog_client = catalog_client
+        self.cart = cart
+        self.quote_fn = quote_fn
+        self.input_fn = input_fn
+        self.output_fn = output_fn
+
+    def _language(self, text):
+        interpretation = interpret(text)
+        if interpretation.status.value != "interpretable":
+            self.output_fn(f"Aclaración: {interpretation.reason}. Ejemplo: lenguaje quiero 6 de Producto A")
+            return
+        resolution = CatalogResolution.from_interpretation(interpretation)
+        for index, mention in enumerate(resolution.mentions):
+            resolution = resolution.search(self.catalog_client, index, limit=10)
+            while True:
+                current = resolution.mentions[index]
+                if current.status is ResolutionStatus.RECOVERABLE_ERROR:
+                    self.output_fn("Error recuperable de catálogo; el carrito se conserva")
+                    return
+                if current.status is ResolutionStatus.NO_RESULTS:
+                    self.output_fn(f"Sin resultados para: {mention.query}")
+                    return
+                page = current.page
+                assert page is not None
+                self.output_fn(f"Mención: {mention.mention.product_text} | cantidad: {mention.mention.quantity} ({mention.mention.quantity_text})")
+                self.output_fn("Candidatos: " + ", ".join(f"{p.product_id}={p.name} [{p.unit}]" for p in page.products))
+                if page.next_cursor:
+                    self.output_fn("Escriba ID o pagina para ver la página siguiente")
+                choice = self.input_fn("seleccionar> ").strip()
+                if choice.lower() == "pagina" and page.next_cursor:
+                    resolution = resolution.next_page(self.catalog_client, index, limit=10)
+                    continue
+                try:
+                    resolution = resolution.select(index, int(choice))
+                    break
+                except (ValueError, TypeError):
+                    self.output_fn("ID inválido para la página vigente")
+        try:
+            proposal = self.cart.prepare(resolution)
+        except CartProposalError as exc:
+            self.output_fn(f"No se puede preparar la propuesta: {exc}")
+            return
+        self.output_fn(f"Propuesta {proposal.proposal_id}: revisar y confirmar")
+        for line in proposal.lines:
+            previous = f" anterior={line.previous_quantity}" if line.previous_quantity is not None else ""
+            self.output_fn(f"{line.operation} {line.product_id} {line.name}: {line.quantity} {line.unit}{previous}")
+        answer = self.input_fn("confirmar propuesta? [s/N] ").strip().lower()
+        if answer != "s":
+            self.cart.cancel(proposal.proposal_id)
+            self.output_fn("Propuesta cancelada; carrito conservado")
+            return
+        try:
+            self.cart.confirm(proposal.proposal_id, proposal.cart_revision)
+        except CartProposalError as exc:
+            self.output_fn(f"Propuesta desactualizada: {exc}")
+            return
+        self.output_fn(f"Carrito actualizado: {self.cart.items()}. Use cotizar para consultar")
+
+    def process(self, command):
+        command = command.strip()
+        if command.startswith("lenguaje "):
+            self._language(command[9:].strip())
+            return True
+        if command == "carrito":
+            self.output_fn(f"Carrito: {self.cart.items()}")
+            return True
+        if command == "cotizar":
+            if self.cart.lines:
+                self.quote_fn(self.cart.items())
+            else:
+                self.output_fn("Carrito vacío: no se envía cotización")
+            return True
+        if command.startswith("agregar ") or command.startswith("modificar "):
+            verb, raw = command.split(" ", 1)
+            try:
+                product_id, quantity = (int(part) for part in raw.split())
+                if verb == "agregar" and product_id in self.cart.lines:
+                    if self.input_fn(f"Cantidad actual {self.cart.lines[product_id]}; reemplazar? [s/N] ").strip().lower() != "s":
+                        return True
+                    self.cart.add(product_id, quantity, replace=True)
+                elif verb == "agregar":
+                    self.cart.add(product_id, quantity)
+                else:
+                    self.cart.modify(product_id, quantity)
+            except (ValueError, KeyError):
+                self.output_fn("Formato o línea inválida")
+            return True
+        if command.startswith("quitar "):
+            try:
+                self.cart.remove(int(command.split()[1]))
+            except (ValueError, IndexError):
+                self.output_fn("Formato: quitar ID")
+            return True
+        return False
 
 def load_router():
     sys.path.insert(0, str(GESTAR))
@@ -86,12 +188,14 @@ def main():
         page = catalog_client.list_products(limit=100); catalog = [(p.product_id, p.name) for p in page.products]; ids = [x[0] for x in catalog]
         presets = {"simple":[{"product_id":ids[0],"quantity":4}], "paquetes":[{"product_id":ids[0],"quantity":6},{"product_id":ids[1],"quantity":12}], "promocion":[{"product_id":ids[6],"quantity":4},{"product_id":ids[7],"quantity":2}], "mixto":[{"product_id":p,"quantity":2} for p in ids[:6]], "benchmark":[{"product_id":p,"quantity":6} for p in ids[:6]]}
         cart = TerminalCart(ids)
+        controller = DemoController(catalog_client, cart, lambda items: quote(base, key, items))
         print("DEMOSTRACIÓN CON DATOS FICTICIOS — no crea ni reserva pedidos"); print("Catálogo consultado a Gestar:", ", ".join(f"{p}: {n}" for p,n in catalog)); print("Use simple/paquetes/promocion/mixto/benchmark, buscar texto, agregar id cantidad, modificar id cantidad, quitar id, carrito, cotizar o salir.")
         for name in args.scenario or []: print(f"\nEscenario: {name}"); quote(base, key, presets[name])
         while not args.scenario:
             command = input("demo> ").strip().lower()
             if command in {"salir","exit","quit","q"}: break
             if command in presets: quote(base, key, presets[command]); continue
+            if controller.process(command): continue
             if command == "carrito": print("Carrito:", cart.items()); continue
             if command == "cotizar":
                 if cart.lines: quote(base, key, cart.items())
