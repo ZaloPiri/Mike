@@ -32,7 +32,7 @@ from mike_app.main import create_app
 
 
 GESTAR = Path(r"C:\Users\Ana\Desktop\GESTAR-mike-base")
-GESTAR_EXPECTED_HEAD = "272a5bbd641b925adc3bd814ea2d486e64f15e8d"
+GESTAR_EXPECTED_HEAD = "1a2a7245b019eadfa1b950de5f9e82a48822be55"
 TOKEN = "synthetic-integration-token"
 
 
@@ -49,24 +49,13 @@ def integrated_stack(tmp_path, monkeypatch):
     ).strip()
     assert observed_head == GESTAR_EXPECTED_HEAD
     monkeypatch.syspath_prepend(str(GESTAR))
-    from app.database import Base, get_db
+    from app.model_base import Base
+    from app.commercial_database import get_db
     from app.models import (Category, MixedPriceGroup, MixedPriceGroupItem,
                             PriceList, Product, ProductPrice, Promotion,
                             PromotionItem, AuditEvent, CashMovement, Sale,
                             StockMovement)
-    # Import only the commercial module: app.routes.__init__ eagerly imports
-    # every HTML router, which would require Gestar's optional Jinja runtime.
-    routes_package = types.ModuleType("app.routes")
-    routes_package.__path__ = [str(GESTAR / "app" / "routes")]
-    sys.modules["app.routes"] = routes_package
-    commercial_spec = importlib.util.spec_from_file_location(
-        "app.routes.commercial", GESTAR / "app" / "routes" / "commercial.py"
-    )
-    commercial_module = importlib.util.module_from_spec(commercial_spec)
-    sys.modules["app.routes.commercial"] = commercial_module
-    assert commercial_spec.loader is not None
-    commercial_spec.loader.exec_module(commercial_module)
-    commercial_router = commercial_module.router
+    from app.commercial_entry import create_commercial_app
 
     db_path = tmp_path / "gestar-synthetic.sqlite3"
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
@@ -112,16 +101,7 @@ def integrated_stack(tmp_path, monkeypatch):
         "GESTAR_COMMERCIAL_SCOPES": "commercial.products.read commercial.quotes.read",
     })
 
-    def isolated_db():
-        db = Session(engine)
-        try:
-            yield db
-        finally:
-            db.close()
-
-    gestar_app = FastAPI()
-    gestar_app.include_router(commercial_router)
-    gestar_app.dependency_overrides[get_db] = isolated_db
+    gestar_app, readonly_service = create_commercial_app(db_path)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(gestar_app, host="127.0.0.1", port=port, log_level="error"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -143,6 +123,7 @@ def integrated_stack(tmp_path, monkeypatch):
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+        readonly_service.close()
         engine.dispose()
         for key in ("GESTAR_COMMERCIAL_ENABLED", "GESTAR_COMMERCIAL_BEARER_TOKEN",
                     "GESTAR_COMMERCIAL_INSTALLATION_ID", "GESTAR_COMMERCIAL_BUSINESS_ID",

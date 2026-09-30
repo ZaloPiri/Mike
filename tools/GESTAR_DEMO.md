@@ -1,7 +1,7 @@
 # Demostración local MIKE–Gestar
 
 Requisitos: el `.venv` de MIKE y Gestar en `mike-commercial-base`, revisión
-`272a5bbd641b925adc3bd814ea2d486e64f15e8d`.
+`1a2a7245b019eadfa1b950de5f9e82a48822be55` para el piloto independiente.
 
 Desde PowerShell, situado en la raíz de MIKE:
 
@@ -59,3 +59,38 @@ Demuestra resolución determinista supervisada, selección por catálogo,
 propuesta temporal y cotización de consulta. No demuestra continuidad
 conversacional, pedidos, cobros, facturación, reservas ni disponibilidad
 futura.
+
+## Piloto local supervisado contra Gestar independiente
+
+Este lanzador no prepara una base ni inicia Gestar. Un operador debe iniciar
+por separado la entrada comercial aislada de Gestar con una SQLite existente y
+descartable, por ejemplo desde el worktree de Gestar:
+
+```powershell
+.venv\Scripts\python.exe -m app.commercial_entry --database C:\ruta\a\base-sintetica.db --host 127.0.0.1 --port 8001
+```
+
+Desde la raíz de MIKE, configure los valores requeridos en el proceso, sin
+poner secretos en el comando, archivos ni logs:
+
+```powershell
+$env:MIKE_ENV='development'
+$env:MIKE_GESTAR_COMMERCIAL_ENABLED='true'
+$env:MIKE_GESTAR_BASE_URL='http://127.0.0.1:8001'
+$env:MIKE_GESTAR_BEARER_TOKEN='<token-sintetico>'
+$env:MIKE_GESTAR_INSTALLATION_ID='<installation-id>'
+$env:MIKE_GESTAR_BUSINESS_ID='<business-id>'
+$env:MIKE_GESTAR_TENANT_ID='<tenant-id>'
+$env:MIKE_GESTAR_DEV_KEY='<clave-local>'
+.venv\Scripts\python.exe -m tools.gestar_pilot
+```
+
+El proceso MIKE solo inicia y cierra su servidor loopback, cliente HTTP y
+carrito temporal. `salir`, EOF, Ctrl+C o un error cierran MIKE sin detener
+Gestar. La consulta mantiene selección explícita, propuesta de un solo uso y
+`cotizar` como acción separada. La entrada de Gestar es responsable de su
+propio cierre y de eliminar únicamente recursos sintéticos de su preparación.
+
+Este procedimiento requiere datos sintéticos hasta completar el preflight de
+configuración, esquema, solo lectura, scopes e identidad. No autoriza datos
+comerciales reales ni garantiza disponibilidad futura.

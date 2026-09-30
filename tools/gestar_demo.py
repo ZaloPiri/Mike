@@ -12,6 +12,7 @@ from mike_app.commercial.cart import TerminalCart
 from mike_app.commercial.catalog_resolution import CatalogResolution, ResolutionStatus
 from mike_app.commercial.cart import CartProposalError
 from mike_app.commercial.language_interpreter import interpret
+from mike_app.commercial.demo_controller import DemoController as SharedDemoController
 
 ROOT = Path(__file__).resolve().parents[1]
 GESTAR = Path(r"C:\Users\Ana\Desktop\GESTAR-mike-base")
@@ -119,6 +120,9 @@ class DemoController:
                 self.output_fn("Formato: quitar ID")
             return True
         return False
+
+DemoController = SharedDemoController
+
 
 def load_router():
     sys.path.insert(0, str(GESTAR))
