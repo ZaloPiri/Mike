@@ -94,3 +94,23 @@ propio cierre y de eliminar únicamente recursos sintéticos de su preparación.
 Este procedimiento requiere datos sintéticos hasta completar el preflight de
 configuración, esquema, solo lectura, scopes e identidad. No autoriza datos
 comerciales reales ni garantiza disponibilidad futura.
+
+## Sesión sobre una copia temporal
+
+El orquestador exige ambas rutas explícitamente, crea una copia SQLite
+consistente, inicia la entrada comercial aislada de Gestar y luego ejecuta el
+lanzador MIKE. No usa `app.main`, no lee `.env` y no modifica la base fuente.
+
+Desde la raíz de MIKE:
+
+```powershell
+.venv\Scripts\python.exe -m tools.gestar_pilot_orchestrator `
+  --source-db C:\Users\Ana\Desktop\GESTAR\data\gestar.db `
+  --gestar-worktree C:\Users\Ana\Desktop\GESTAR-mike-base
+```
+
+La sesión muestra la fecha de captura y advierte que los precios corresponden
+a esa instantánea. El operador usa los comandos normales de `gestar_pilot`,
+incluido `lenguaje <texto>`, selección por ID, confirmación, `carrito`,
+`cotizar` y `salir`. Salir, EOF, Ctrl+C o un fallo cierran únicamente los
+procesos iniciados por el orquestador y eliminan su copia temporal.
