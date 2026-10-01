@@ -32,6 +32,14 @@ class BlockingCommercial(FakeCommercial):
         return super().quote(items)
 
 
+class CatalogCommercial(FakeCommercial):
+    def list_products(self, query, limit=50, cursor=None):
+        return CatalogPage("install", "business", (
+            CatalogProduct(1, "Crudo", "CRU", "unidad"),
+            CatalogProduct(2, "Roquefort", "ROQ", "unidad"),
+        ), None)
+
+
 def _settings(**changes):
     values = dict(app_name="mike", app_version="0.1.0", environment="development",
                   openai_api_key=None, openai_model=None, episode_journal="memory",
@@ -46,6 +54,64 @@ def _settings(**changes):
 
 def _headers():
     return {"Host": "127.0.0.1:8000", "Origin": "http://127.0.0.1:8000"}
+
+
+def _authenticated_client(app):
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+    client.__enter__()
+    app.state.web_sessions.catalog_client = CatalogCommercial()
+    app.state.web_sessions.quote_client = app.state.web_sessions.catalog_client
+    headers = _headers()
+    code = client.post("/dev/web-commercial/control/bootstrap-code",
+                       headers={**headers, "X-MIKE-Control-Key": "control"}).json()["code"]
+    csrf = client.post("/dev/web-commercial/bootstrap", headers=headers,
+                       json={"code": code}).json()["csrf"]
+    return client, {**headers, "X-MIKE-CSRF": csrf}
+
+
+def test_cart_state_keeps_catalog_name_and_unit_across_reload():
+    app = create_app(_settings())
+    client, auth = _authenticated_client(app)
+    try:
+        page = client.post("/dev/web-commercial/search", headers=auth,
+                           json={"query": "Crudo", "cursor": None, "limit": 10}).json()
+        assert client.post("/dev/web-commercial/cart/add", headers=auth,
+                           json={"product_id": 1, "quantity": 6,
+                                 "selection_id": page["search_id"], "expected_revision": 0}).status_code == 200
+        before = client.get("/dev/web-commercial/state", headers=auth).json()
+        assert before["lines"] == [{"product_id": 1, "quantity": 6, "name": "Crudo", "unit": "unidad"}]
+        reloaded = client.get("/dev/web-commercial/", headers={"Host": auth["Host"]})
+        assert 'data-csrf="' in reloaded.text
+        after = client.get("/dev/web-commercial/state", headers=auth).json()
+        assert after["lines"] == before["lines"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_reload_state_rehydrates_quote_names_and_formats_capture_separately():
+    app = create_app(_settings())
+    with TestClient(app) as client:
+        page = client.get("/dev/web-commercial/", headers={"Host": "127.0.0.1:8000"})
+        assert "const originalRenderState=renderState" in page.text
+        assert "const originalState=state" in page.text
+        assert "dateTime(value)" in page.text
+        assert "Captura: '+dateTime(value)" in page.text
+        assert "dataset.captureAt=s.capture_at||''" in page.text
+
+
+def test_cart_state_falls_back_to_product_id_and_names_are_session_isolated():
+    app = create_app(_settings())
+    with TestClient(app) as client:
+        manager = app.state.web_sessions
+        first = manager.bootstrap(manager.issue_bootstrap_code())
+        second = manager.bootstrap(manager.issue_bootstrap_code())
+        first.product_names[1] = "Crudo"
+        first.product_units[1] = "unidad"
+        assert second.product_names == {}
+        first.cart.allowed_ids.add(99)
+        first.cart.add(99, 1)
+        assert first.product_names.get(99) is None
+        assert first.product_units.get(99) is None
 
 
 def test_get_does_not_create_session_and_bootstrap_is_single_use():

@@ -29,6 +29,8 @@ class WebSession:
     cart: TerminalCart
     resolution: CatalogResolution | None = None
     searches: dict[str, tuple[int | None, object]] = field(default_factory=dict)
+    product_names: dict[int, str] = field(default_factory=dict)
+    product_units: dict[int, str] = field(default_factory=dict)
     proposal: object | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
