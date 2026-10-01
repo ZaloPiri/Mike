@@ -161,6 +161,21 @@ def test_authenticated_initial_page_is_not_cached_and_contains_current_csrf():
         assert f'data-csrf="{csrf}"' in page.text
         assert page.headers["cache-control"] == "no-store, no-cache, must-revalidate"
         assert page.headers["vary"] == "Cookie"
+
+
+def test_quote_presentation_is_safe_decimal_and_exposes_all_validated_sections():
+    app = create_app(_settings())
+    with TestClient(app) as client:
+        page = client.get("/dev/web-commercial/", headers={"Host": "127.0.0.1:8000"})
+        assert "function renderQuote(q)" in page.text
+        assert "q.pricing_breakdown" in page.text
+        assert "q.promotions_applied" in page.text
+        assert "q.mixed_groups_applied" in page.text
+        assert "q.stock_warnings" in page.text
+        assert "Producto ID ${id}" in page.text
+        assert "JSON original" in page.text
+        assert "<details>" not in page.text
+        assert "title.textContent=`Total ${q.currency||'ARS'} ${q.total}`" in page.text
         assert "if(csrf){$('login').hidden=true;$('app').hidden=false;state();}" in page.text
 
 
