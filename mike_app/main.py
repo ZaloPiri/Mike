@@ -70,6 +70,8 @@ from mike_app.runtime.postgresql_episode_journal import (
     EpisodeJournalInfrastructureError,
     PostgreSQLEpisodeJournal,
 )
+from mike_app.commercial.web_sessions import WebSessionManager
+from mike_app.api.dev_web_commercial import router as dev_web_commercial_router
 
 def _configure_app(app: FastAPI, episode_journal) -> None:
     settings: Settings = app.state.settings
@@ -271,6 +273,7 @@ def _configure_app(app: FastAPI, episode_journal) -> None:
         episode_journal, DevelopmentAdapter()
     )
     app.state.gestar_commercial_client = None
+    app.state.web_sessions = WebSessionManager(None, None)
 
 
 
@@ -313,6 +316,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
     created.include_router(dev_messages_router)
     created.include_router(dev_inspection_router)
     created.include_router(dev_commercial_router)
+    created.include_router(dev_web_commercial_router)
     return created
 
 

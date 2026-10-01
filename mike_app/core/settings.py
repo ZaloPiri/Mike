@@ -20,6 +20,7 @@ class Settings:
     gestar_business_id: str | None = None
     gestar_tenant_id: str | None = None
     gestar_dev_key: str | None = None
+    web_control_key: str | None = None
 
 
 def get_settings() -> Settings:
@@ -40,6 +41,7 @@ def get_settings() -> Settings:
         gestar_business_id=os.getenv("MIKE_GESTAR_BUSINESS_ID"),
         gestar_tenant_id=os.getenv("MIKE_GESTAR_TENANT_ID"),
         gestar_dev_key=os.getenv("MIKE_GESTAR_DEV_KEY"),
+        web_control_key=os.getenv("MIKE_WEB_CONTROL_KEY"),
     )
 
 
