@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import secrets
+import os
 from typing import Any
 
 from fastapi import APIRouter, Body, Header, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from mike_app.commercial.catalog_resolution import CatalogResolution, MentionResolution, ResolutionStatus
 from mike_app.commercial.cart import CartProposalError
@@ -68,10 +69,55 @@ def _session(request: Request, csrf: str | None = Header(default=None, alias=CSR
 def initial(request: Request):
     try:
         _settings(request)
-        _origin(request, bootstrap=False) if request.headers.get("origin") else None
-        return {"bootstrap_required": True}
+        _origin(request, require_origin=False)
+        headers = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache", "Vary": "Cookie"}
+        csrf = ""
+        token = request.cookies.get(COOKIE)
+        if token:
+            try:
+                csrf = request.app.state.web_sessions.get(token).csrf
+            except WebSessionError:
+                response = HTMLResponse(_PAGE.replace("__MIKE_CSRF__", ""), headers=headers)
+                response.delete_cookie(COOKIE, path="/dev/", secure=False, httponly=True, samesite="strict")
+                return response
+        return HTMLResponse(_PAGE.replace("__MIKE_CSRF__", csrf), headers=headers)
     except WebSessionError as exc:
         return _error(exc)
+
+
+_PAGE = r'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta id="mike-csrf" data-csrf="__MIKE_CSRF__">
+<title>MIKE · Cotización local</title><style>
+body{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#202124}main{display:grid;gap:1rem}section{border:1px solid #ddd;border-radius:8px;padding:1rem}button{margin:.25rem;padding:.45rem .7rem}input{padding:.45rem;margin:.25rem}pre{white-space:pre-wrap;background:#f5f5f5;padding:.7rem}.muted{color:#666}.danger{color:#a00}.ok{color:#064}
+</style></head><body><main><h1>MIKE · consulta comercial local</h1>
+<p><strong>No crea pedidos ni reserva stock.</strong> La cotización usa una instantánea de captura.</p>
+<section id="login"><h2>Acceso</h2><label>Código bootstrap <input id="code" autocomplete="one-time-code"></label><button id="bootstrap">Entrar</button><p id="loginMsg" class="danger"></p></section>
+<section id="app" hidden><p id="capture" class="muted"></p><button id="logout">Cerrar sesión</button>
+<h2>Solicitud</h2><input id="phrase" size="55" placeholder="quiero 2 de Producto A"><button id="interpret">Interpretar</button><p id="message"></p>
+<h2>Resolución de la frase</h2><div id="mentions"></div>
+<h2>Búsqueda manual</h2><input id="query" placeholder="nombre o código"><button id="search">Buscar</button><div id="manualResults"></div>
+<h2>Propuesta</h2><div id="proposal"></div><button id="prepare" disabled>Preparar propuesta</button><button id="confirm" disabled>Confirmar</button><button id="cancel" disabled>Cancelar</button>
+<h2>Carrito confirmado</h2><div id="cart"></div><button id="quote">Cotizar</button><pre id="quoteResult"></pre></section></main>
+<script>
+const $=id=>document.getElementById(id);let csrf=$('mike-csrf').dataset.csrf||null,revision=null,proposal=null,searchId=null,latest=0,quotedRevision=null,resolvedMentions=new Set(),mentionCount=0;
+const headers=()=>({'Content-Type':'application/json','X-MIKE-CSRF':csrf});
+async function api(path,body,method='POST'){const id=++latest;const r=await fetch(path,{method,headers:headers(),body:method==='GET'?undefined:JSON.stringify(body)});const data=await r.json().catch(()=>({error:{code:'respuesta_invalida'}}));if(id!==latest)return {stale:true};if(!r.ok)throw data.error||{code:'error'};return data}
+function msg(x,good=false){$('message').textContent=x;$('message').className=good?'ok':'danger'}
+function renderState(s){if(s.csrf)csrf=s.csrf;const changed=revision!==null&&revision!==s.cart_revision;revision=s.cart_revision;if(changed){quotedRevision=null;$('quoteResult').textContent='La cotización anterior quedó invalidada por un cambio del carrito.'}const cart=$('cart');cart.replaceChildren();if(!s.lines.length)cart.textContent='Vacío';for(const line of s.lines){const row=document.createElement('div');row.textContent=`ID ${line.product_id}: ${line.quantity} `;const q=document.createElement('input');q.type='number';q.min='1';q.max='10000';q.value=line.quantity;const change=document.createElement('button');change.textContent='Modificar';change.onclick=()=>mutate('/dev/web-commercial/cart/modify',{product_id:line.product_id,quantity:Number(q.value),expected_revision:revision});const remove=document.createElement('button');remove.textContent='Quitar';remove.onclick=()=>mutate('/dev/web-commercial/cart/remove',{product_id:line.product_id,expected_revision:revision});row.append(q,change,remove);cart.append(row)}if(s.proposal_id)$('proposal').textContent='Propuesta pendiente: '+s.proposal_id;else if(!proposal)$('proposal').textContent='Sin propuesta pendiente'}
+async function state(){try{const s=await api('/dev/web-commercial/state',null,'GET');if(s&&!s.stale){renderState(s);$('capture').textContent='Captura: '+(s.capture_at||'la instantánea configurada')+' · Los precios corresponden a esa captura.'}}catch(e){csrf=null;$('login').hidden=false;$('app').hidden=true;$('loginMsg').textContent='Sesión no disponible: '+(e.code||'error')}}
+async function mutate(path,body){try{const d=await api(path,body);if(!d.stale){await state();msg('Carrito actualizado.',true)}}catch(e){msg('Carrito: '+e.code);await state()}}
+$('bootstrap').onclick=async()=>{try{const r=await fetch('/dev/web-commercial/bootstrap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:$('code').value})});const d=await r.json();if(!r.ok)throw d.error;csrf=d.csrf;$('login').hidden=true;$('app').hidden=false;await state()}catch(e){$('loginMsg').textContent='No se pudo iniciar: '+(e.code||'error')}};
+ $('interpret').onclick=async()=>{try{const d=await api('/dev/web-commercial/interpret',{text:$('phrase').value});if(d.stale)return;resolvedMentions=new Set();mentionCount=d.mentions.length;$('prepare').disabled=true;const box=$('mentions');box.replaceChildren();d.mentions.forEach((m,i)=>{const row=document.createElement('section');row.dataset.mentionIndex=i;const title=document.createElement('div');title.textContent=`Mención ${i+1}: ${m.quantity} ${m.unit_text||''} ${m.product_text}`;const status=document.createElement('span');status.textContent=' · pendiente';const results=document.createElement('div');results.className='mention-results';const b=document.createElement('button');b.textContent='Buscar esta mención';b.onclick=()=>searchMention(i,row,results,status,m.product_text,null);row.append(title,status,b,results);box.append(row)});msg('Interpretación lista. Busca cada mención y selecciona por ID.',true)}catch(e){msg('Interpretación: '+e.code);await state()}};
+async function searchMention(index,row,results,status,query,cursor){try{const d=await api('/dev/web-commercial/search',{query,cursor,limit:10,mention_index:index});if(d.stale)return;const sid=d.search_id;results.replaceChildren();for(const p of d.products){const b=document.createElement('button');b.textContent=`Seleccionar ID ${p.product_id} · ${p.name} · ${p.unit}`;b.onclick=async()=>{await select(p.product_id,sid);resolvedMentions.add(index);status.textContent=' · seleccionado ID '+p.product_id;$('prepare').disabled=resolvedMentions.size!==mentionCount};results.append(b)}if(d.next_cursor){const next=document.createElement('button');next.textContent='Siguiente página';next.onclick=()=>searchMention(index,row,results,status,query,d.next_cursor);results.append(next)}}catch(e){status.textContent=' · error recuperable';msg('Búsqueda: '+e.code);await state()}}
+$('search').onclick=async()=>{try{const d=await api('/dev/web-commercial/search',{query:$('query').value,cursor:null,limit:10});if(d.stale)return;searchId=d.search_id;const box=$('manualResults');box.replaceChildren(...d.products.map(p=>{const b=document.createElement('button');b.textContent=`Seleccionar ID ${p.product_id} · ${p.name} · ${p.unit}`;b.onclick=()=>select(p.product_id,d.search_id);return b}));if(d.next_cursor){const b=document.createElement('button');b.textContent='Siguiente página';b.onclick=async()=>{const n=await api('/dev/web-commercial/search',{query:$('query').value,cursor:d.next_cursor,limit:10});if(!n.stale){searchId=n.search_id;$('manualResults').textContent=n.products.map(p=>`ID ${p.product_id} · ${p.name} · ${p.unit}`).join(' · ')}};box.append(b)}}catch(e){msg('Búsqueda: '+e.code);await state()}};
+async function select(id,sid=searchId){try{const d=await api('/dev/web-commercial/select',{search_id:sid,product_id:id});if(d.stale)return;msg('Producto seleccionado: ID '+id,true)}catch(e){msg('Selección: '+e.code);await state()}}
+$('prepare').onclick=async()=>{try{proposal=await api('/dev/web-commercial/proposals',{});$('proposal').textContent=proposal.lines.map(x=>`${x.operation} ID ${x.product_id}: ${x.previous_quantity??'—'} → ${x.quantity} ${x.unit}`).join(' · ');$('confirm').disabled=false;$('cancel').disabled=false}catch(e){msg('Propuesta: '+e.code)}};
+$('confirm').onclick=async()=>{try{await api('/dev/web-commercial/proposals/'+proposal.proposal_id+'/confirm',{expected_revision:proposal.cart_revision});proposal=null;$('confirm').disabled=true;$('cancel').disabled=true;await state();msg('Carrito confirmado. Cotizar es una acción separada.',true)}catch(e){msg('Confirmación: '+e.code);await state()}};
+$('cancel').onclick=async()=>{try{await api('/dev/web-commercial/proposals/'+proposal.proposal_id+'/cancel',{});proposal=null;$('confirm').disabled=true;$('cancel').disabled=true;msg('Propuesta cancelada; carrito conservado.',true)}catch(e){msg('Cancelación: '+e.code)}};
+ $('quote').onclick=async()=>{try{const d=await api('/dev/web-commercial/quote',{expected_revision:revision});if(d.stale)return;quotedRevision=d.cart_revision;$('quoteResult').textContent=JSON.stringify(d.quote,null,2)}catch(e){$('quoteResult').textContent='Cotización no disponible: '+e.code;await state()}};
+$('logout').onclick=async()=>{try{await api('/dev/web-commercial/logout',{});location.reload()}catch(e){msg('Cierre: '+e.code)}};
+if(csrf){$('login').hidden=true;$('app').hidden=false;state();}
+</script></body></html>'''
 
 
 @router.post("/control/bootstrap-code")
@@ -107,8 +153,9 @@ def state(request: Request):
     try:
         _settings(request); _origin(request, require_origin=False); session = _session(request)
         proposal = session.proposal
-        return {"cart_revision": session.cart.revision, "lines": session.cart.items(),
-                "proposal_id": str(proposal.proposal_id) if proposal else None}
+        return {"csrf": session.csrf, "cart_revision": session.cart.revision, "lines": session.cart.items(),
+                "proposal_id": str(proposal.proposal_id) if proposal else None,
+                "capture_at": os.getenv("MIKE_WEB_CAPTURE_AT")}
     except WebSessionError as exc:
         return _error(exc)
 

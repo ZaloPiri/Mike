@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import json
 from datetime import datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -119,6 +120,33 @@ def _wait_for_gestar(port: int, token: str, deadline_seconds: float = 15.0) -> N
     raise RuntimeError("Gestar no quedó disponible dentro del plazo")
 
 
+def _wait_for_mike(port: int, deadline_seconds: float = 15.0) -> None:
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            request = Request(f"http://127.0.0.1:{port}/dev/web-commercial/", headers={"Host": f"127.0.0.1:{port}"})
+            with urlopen(request, timeout=1) as response:
+                if response.status == 200:
+                    return
+        except Exception:
+            time.sleep(0.1)
+    raise RuntimeError("MIKE web no quedÃ³ disponible dentro del plazo")
+
+
+def _request_bootstrap_code(port: int, control_key: str) -> str:
+    request = Request(
+        f"http://127.0.0.1:{port}/dev/web-commercial/control/bootstrap-code",
+        data=b"{}", method="POST",
+        headers={"Host": f"127.0.0.1:{port}", "Content-Type": "application/json", "X-MIKE-Control-Key": control_key},
+    )
+    with urlopen(request, timeout=3) as response:
+        payload = json.loads(response.read())
+    code = payload.get("code")
+    if not isinstance(code, str) or not code:
+        raise RuntimeError("MIKE no devolviÃ³ un cÃ³digo bootstrap")
+    return code
+
+
 def _start(command: list[str], cwd: Path, environment: dict[str, str], *, inherit_io: bool = False) -> subprocess.Popen:
     return subprocess.Popen(
         command,
@@ -167,7 +195,7 @@ def _remove_owned_tree(path: Path, errors: list[str], *, attempts: int = 8, dela
         errors.append(f"recurso propio {path}: {last_error}")
 
 
-def run(source_db: str, gestar_worktree: str, mike_worktree: str | None = None) -> int:
+def run(source_db: str, gestar_worktree: str, mike_worktree: str | None = None, mode: str = "terminal") -> int:
     source = _existing_source(source_db)
     gestar = Path(gestar_worktree).expanduser().resolve()
     if not (gestar / "app" / "commercial_entry.py").is_file():
@@ -180,6 +208,7 @@ def run(source_db: str, gestar_worktree: str, mike_worktree: str | None = None) 
     mike_process = None
     token = secrets.token_urlsafe(32)
     dev_key = secrets.token_urlsafe(24)
+    control_key = secrets.token_urlsafe(32)
     capture_at = datetime.now().astimezone().isoformat()
     try:
         backup_source(source, copy)
@@ -216,7 +245,27 @@ def run(source_db: str, gestar_worktree: str, mike_worktree: str | None = None) 
             "MIKE_GESTAR_BUSINESS_ID": "pilot-business",
             "MIKE_GESTAR_TENANT_ID": "pilot-tenant",
             "MIKE_GESTAR_DEV_KEY": dev_key,
+            "MIKE_WEB_CONTROL_KEY": control_key,
+            "MIKE_WEB_CAPTURE_AT": capture_at,
         }
+        if mode == "web":
+            web_port = _free_port()
+            mike_process = _start([sys.executable, "-m", "uvicorn", "mike_app.main:app", "--host", "127.0.0.1", "--port", str(web_port)], mike, mike_environment)
+            _wait_for_mike(web_port)
+            code = _request_bootstrap_code(web_port, control_key)
+            print(f"MIKE web: http://127.0.0.1:{web_port}/dev/web-commercial/")
+            print(f"Código bootstrap (un solo uso): {code}")
+            print("Escriba 'salir' en esta terminal para cerrar el piloto completo.")
+            while True:
+                try:
+                    command = input("piloto> ").strip().lower()
+                    if command == "salir":
+                        break
+                    if command in {"codigo", "bootstrap", "codigo bootstrap"}:
+                        print(f"Código bootstrap (un solo uso): {_request_bootstrap_code(web_port, control_key)}")
+                except EOFError:
+                    break
+            return 0
         mike_process = _start([sys.executable, "-m", "tools.gestar_pilot"], mike, mike_environment, inherit_io=True)
         return mike_process.wait()
     finally:
@@ -233,9 +282,10 @@ def main() -> int:
     parser.add_argument("--source-db", required=True, help="Ruta explícita a la base fuente existente")
     parser.add_argument("--gestar-worktree", required=True, help="Worktree validado de Gestar")
     parser.add_argument("--mike-worktree", default=None, help="Worktree MIKE; por defecto, la raíz actual del módulo")
+    parser.add_argument("--mode", choices=("terminal", "web"), default="terminal")
     args = parser.parse_args()
     try:
-        return run(args.source_db, args.gestar_worktree, args.mike_worktree)
+        return run(args.source_db, args.gestar_worktree, args.mike_worktree, args.mode)
     except Exception as exc:
         print(f"No se pudo iniciar la sesión: {exc}", file=sys.stderr)
         return 2

@@ -114,3 +114,25 @@ a esa instantánea. El operador usa los comandos normales de `gestar_pilot`,
 incluido `lenguaje <texto>`, selección por ID, confirmación, `carrito`,
 `cotizar` y `salir`. Salir, EOF, Ctrl+C o un fallo cierran únicamente los
 procesos iniciados por el orquestador y eliminan su copia temporal.
+# Piloto web local supervisado
+
+Desde la raíz de MIKE, con una base sintética explícita y el worktree
+validado de Gestar:
+
+```powershell
+.venv\Scripts\python.exe -m tools.gestar_pilot_orchestrator `
+  --source-db C:\ruta\base-sintetica.sqlite3 `
+  --gestar-worktree C:\Users\Ana\Desktop\GESTAR-mike-base `
+  --mode web
+```
+
+El orquestador muestra una URL loopback y un código bootstrap de un solo uso.
+Ábrelos en Chrome, introduce el código, interpreta la frase, busca y
+selecciona IDs explícitos, prepara y confirma la propuesta, y pulsa `Cotizar`.
+Para emitir otro código desde la terminal escribe `codigo` (o `bootstrap`).
+La cotización usa la captura indicada y no crea pedidos ni reserva stock.
+
+Para terminar el piloto completo escribe `salir` en la terminal del
+orquestador. Cerrar la pestaña o pulsar `Cerrar sesión` solo revoca la sesión
+web; no anuncia ni ejecuta la limpieza del piloto. El orquestador detiene
+únicamente los procesos que inició y elimina su copia temporal.

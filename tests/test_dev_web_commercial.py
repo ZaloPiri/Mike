@@ -5,6 +5,7 @@ from mike_app.core.settings import Settings
 from mike_app.main import create_app
 from mike_app.commercial.web_sessions import WebSessionManager
 from fastapi.testclient import TestClient
+import re
 import threading
 import time
 
@@ -52,7 +53,9 @@ def test_get_does_not_create_session_and_bootstrap_is_single_use():
     with TestClient(app) as client:
         app.state.web_sessions.catalog_client = FakeCommercial()
         app.state.web_sessions.quote_client = app.state.web_sessions.catalog_client
-        assert client.get("/dev/web-commercial/", headers={"Host": "127.0.0.1:8000"}).json() == {"bootstrap_required": True}
+        initial = client.get("/dev/web-commercial/", headers={"Host": "127.0.0.1:8000"})
+        assert initial.status_code == 200
+        assert "Código bootstrap" in initial.text
         response = client.post("/dev/web-commercial/control/bootstrap-code", headers={**_headers(), "X-MIKE-Control-Key": "control"})
         code = response.json()["code"]
         boot = client.post("/dev/web-commercial/bootstrap", headers=_headers(), json={"code": code})
@@ -60,6 +63,105 @@ def test_get_does_not_create_session_and_bootstrap_is_single_use():
         csrf = boot.json()["csrf"]
         assert client.post("/dev/web-commercial/bootstrap", headers=_headers(), json={"code": code}).status_code == 401
         assert client.get("/dev/web-commercial/state", headers={**_headers(), "X-MIKE-CSRF": csrf}).status_code == 200
+
+
+def test_bootstrap_cookie_authenticates_state_after_reload_and_reused_code_is_rejected():
+    app = create_app(_settings())
+    with TestClient(app) as client:
+        app.state.web_sessions.catalog_client = FakeCommercial()
+        app.state.web_sessions.quote_client = app.state.web_sessions.catalog_client
+        headers = _headers()
+        code = client.post("/dev/web-commercial/control/bootstrap-code",
+                           headers={**headers, "X-MIKE-Control-Key": "control"}).json()["code"]
+        boot = client.post("/dev/web-commercial/bootstrap", headers=headers, json={"code": code})
+        assert boot.status_code == 200
+        assert "mike_web_session=" in boot.headers["set-cookie"]
+        csrf = boot.json()["csrf"]
+        # The browser keeps the Set-Cookie across the page reload; only the
+        # CSRF header is needed explicitly for the authenticated GET.
+        assert client.get("/dev/web-commercial/state",
+                          headers={**headers, "X-MIKE-CSRF": csrf}).status_code == 200
+        assert client.post("/dev/web-commercial/bootstrap", headers=headers,
+                           json={"code": code}).status_code == 401
+
+
+def test_page_reload_recovers_csrf_from_authenticated_html_without_new_bootstrap():
+    app = create_app(_settings())
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        app.state.web_sessions.catalog_client = FakeCommercial()
+        app.state.web_sessions.quote_client = app.state.web_sessions.catalog_client
+        headers = _headers()
+        code = client.post("/dev/web-commercial/control/bootstrap-code",
+                           headers={**headers, "X-MIKE-Control-Key": "control"}).json()["code"]
+        boot = client.post("/dev/web-commercial/bootstrap", headers=headers, json={"code": code})
+        assert boot.status_code == 200
+        old_csrf = boot.json()["csrf"]
+        assert client.post("/dev/web-commercial/interpret",
+                           headers={**headers, "X-MIKE-CSRF": old_csrf},
+                           json={"text": "quiero 2 de Producto A"}).status_code == 200
+
+        # Model a new page: retain the cookie jar, but discard all JS state,
+        # including the previous CSRF value. The HTML is the recovery channel.
+        page = client.get("/dev/web-commercial/", headers={"Host": headers["Host"]})
+        recovered = re.search(r'data-csrf="([^"]+)"', page.text).group(1)
+        assert recovered == old_csrf
+        assert client.get("/dev/web-commercial/state",
+                          headers={**headers, "X-MIKE-CSRF": recovered}).status_code == 200
+        assert len(app.state.web_sessions._sessions) == 1
+        assert client.post("/dev/web-commercial/bootstrap", headers=headers,
+                           json={"code": code}).status_code == 401
+
+
+def test_initial_page_discards_cookie_from_previous_instance_and_allows_new_bootstrap():
+    old_app = create_app(_settings())
+    with TestClient(old_app, base_url="http://127.0.0.1:8000") as old_client:
+        old_app.state.web_sessions.catalog_client = FakeCommercial()
+        old_app.state.web_sessions.quote_client = old_app.state.web_sessions.catalog_client
+        headers = _headers()
+        old_code = old_client.post("/dev/web-commercial/control/bootstrap-code",
+                                   headers={**headers, "X-MIKE-Control-Key": "control"}).json()["code"]
+        old_client.post("/dev/web-commercial/bootstrap", headers=headers, json={"code": old_code})
+        stale_cookie = old_client.cookies.get("mike_web_session")
+
+    new_app = create_app(_settings())
+    with TestClient(new_app, base_url="http://127.0.0.1:8000") as client:
+        client.cookies.set("mike_web_session", stale_cookie, domain="127.0.0.1", path="/dev/")
+        page = client.get("/dev/web-commercial", headers={"Host": "127.0.0.1:8000"})
+        assert page.status_code == 200
+        assert "Código bootstrap" in page.text
+        assert "data-csrf=\"\"" in page.text
+        assert "mike_web_session" in page.headers.get("set-cookie", "")
+        code = client.post("/dev/web-commercial/control/bootstrap-code",
+                           headers={**_headers(), "X-MIKE-Control-Key": "control"}).json()["code"]
+        assert client.post("/dev/web-commercial/bootstrap", headers=_headers(),
+                           json={"code": code}).status_code == 200
+
+
+def test_initial_page_without_cookie_and_with_trailing_slash_is_html():
+    app = create_app(_settings())
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        for path in ("/dev/web-commercial", "/dev/web-commercial/"):
+            response = client.get(path, headers={"Host": "127.0.0.1:8000"})
+            assert response.status_code == 200
+            assert "Código bootstrap" in response.text
+            assert response.headers.get("content-type", "").startswith("text/html")
+            assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+            assert response.headers["vary"] == "Cookie"
+
+
+def test_authenticated_initial_page_is_not_cached_and_contains_current_csrf():
+    app = create_app(_settings())
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        headers = _headers()
+        code = client.post("/dev/web-commercial/control/bootstrap-code",
+                           headers={**headers, "X-MIKE-Control-Key": "control"}).json()["code"]
+        csrf = client.post("/dev/web-commercial/bootstrap", headers=headers,
+                           json={"code": code}).json()["csrf"]
+        page = client.get("/dev/web-commercial", headers={"Host": headers["Host"]})
+        assert f'data-csrf="{csrf}"' in page.text
+        assert page.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+        assert page.headers["vary"] == "Cookie"
+        assert "if(csrf){$('login').hidden=true;$('app').hidden=false;state();}" in page.text
 
 
 def test_web_flow_interpret_select_propose_confirm_and_quote_without_auto_quote():

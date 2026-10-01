@@ -82,7 +82,8 @@ def test_orchestrator_requires_explicit_source_and_worktree():
 
 
 @pytest.mark.skipif(not GESTAR.exists(), reason="Gestar worktree no disponible")
-def test_orchestrator_runs_real_programs_and_preserves_preexisting_service(tmp_path):
+@pytest.mark.parametrize("mode", ["terminal", "web"])
+def test_orchestrator_runs_real_programs_and_preserves_preexisting_service(tmp_path, mode):
     prep = r'''
 from datetime import date
 from decimal import Decimal
@@ -125,15 +126,21 @@ engine.dispose()
                     break
             except Exception:
                 time.sleep(0.05)
+        command = [sys.executable, "-m", "tools.gestar_pilot_orchestrator", "--source-db", str(source), "--gestar-worktree", str(GESTAR), "--mode", mode]
         process = subprocess.Popen(
-            [sys.executable, "-m", "tools.gestar_pilot_orchestrator", "--source-db", str(source), "--gestar-worktree", str(GESTAR)],
+            command,
             cwd=Path(__file__).parents[1], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
         )
-        output, error = process.communicate("lenguaje quiero 2 de Producto A\n1\ns\ncotizar\nsalir\n", timeout=45)
+        interaction = "lenguaje quiero 2 de Producto A\n1\ns\ncotizar\nsalir\n" if mode == "terminal" else "salir\n"
+        output, error = process.communicate(interaction, timeout=45)
         assert process.returncode == 0, error
-        assert "HTTP 200" in output
-        assert "ARS 200.00" in output
+        if mode == "terminal":
+            assert "HTTP 200" in output
+            assert "ARS 200.00" in output
+        else:
+            assert "MIKE web: http://127.0.0.1:" in output
+            assert "Código bootstrap" in output
         assert __import__("hashlib").sha256(source.read_bytes()).digest() == source_hash
         assert service.poll() is None
     finally:
