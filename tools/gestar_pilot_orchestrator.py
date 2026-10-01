@@ -131,6 +131,42 @@ def _start(command: list[str], cwd: Path, environment: dict[str, str], *, inheri
     )
 
 
+def _stop_owned_process(process: subprocess.Popen | None, label: str, errors: list[str]) -> None:
+    """Stop and reap one process created by this orchestrator only."""
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    except Exception as exc:
+        errors.append(f"proceso propio {label} PID {process.pid}: {exc}")
+
+
+def _remove_owned_tree(path: Path, errors: list[str], *, attempts: int = 8, delay: float = 0.25) -> None:
+    """Remove a session directory after child processes have been reaped.
+
+    Windows can release a SQLite handle shortly after process exit.  Retries
+    are bounded and happen only after all owned children were waited for.
+    """
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+    if last_error is not None:
+        errors.append(f"recurso propio {path}: {last_error}")
+
+
 def run(source_db: str, gestar_worktree: str, mike_worktree: str | None = None) -> int:
     source = _existing_source(source_db)
     gestar = Path(gestar_worktree).expanduser().resolve()
@@ -185,23 +221,9 @@ def run(source_db: str, gestar_worktree: str, mike_worktree: str | None = None) 
         return mike_process.wait()
     finally:
         cleanup_errors: list[str] = []
-        for process in (mike_process, gestar_process):
-            if process is not None and process.poll() is None:
-                try:
-                    process.terminate()
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    try:
-                        process.kill()
-                        process.wait(timeout=5)
-                    except Exception as exc:
-                        cleanup_errors.append(f"proceso PID {process.pid}: {exc}")
-                except Exception as exc:
-                    cleanup_errors.append(f"proceso PID {process.pid}: {exc}")
-        try:
-            shutil.rmtree(temporary)
-        except OSError as exc:
-            cleanup_errors.append(f"recurso propio {temporary}: {exc}")
+        _stop_owned_process(mike_process, "MIKE", cleanup_errors)
+        _stop_owned_process(gestar_process, "Gestar", cleanup_errors)
+        _remove_owned_tree(temporary, cleanup_errors)
         for error in cleanup_errors:
             print(f"No se pudo limpiar {error}", file=sys.stderr)
 

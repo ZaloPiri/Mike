@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from tools.gestar_pilot_orchestrator import REQUIRED_SCHEMA, backup_source, validate_copy
+from tools.gestar_pilot_orchestrator import (
+    REQUIRED_SCHEMA,
+    _remove_owned_tree,
+    backup_source,
+    validate_copy,
+)
 
 
 GESTAR = Path(r"C:\Users\Ana\Desktop\GESTAR-mike-base")
@@ -39,6 +44,31 @@ def test_backup_uses_readonly_source_and_validates_copy(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         read_only.execute('CREATE TABLE forbidden (id INTEGER)')
     read_only.close()
+
+
+def test_cleanup_retries_windows_style_late_release(tmp_path, monkeypatch):
+    temporary = tmp_path / "session"
+    temporary.mkdir()
+    attempts = 0
+
+    import tools.gestar_pilot_orchestrator as orchestrator
+
+    real_rmtree = orchestrator.shutil.rmtree
+
+    def delayed_rmtree(path):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(32, "archivo utilizado por otro proceso")
+        real_rmtree(path)
+
+    monkeypatch.setattr(orchestrator.shutil, "rmtree", delayed_rmtree)
+    errors = []
+    _remove_owned_tree(temporary, errors, attempts=3, delay=0)
+
+    assert attempts == 3
+    assert not errors
+    assert not temporary.exists()
 
 
 def test_orchestrator_requires_explicit_source_and_worktree():
